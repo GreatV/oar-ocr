@@ -1,7 +1,7 @@
 //! Geometry and crop preparation used by parsing pipelines.
 
 use crate::document::geometry::BoundingBox;
-use image::{GrayImage, RgbImage};
+use image::RgbImage;
 use std::collections::HashSet;
 
 #[inline]
@@ -101,9 +101,16 @@ pub fn filter_overlap_boxes(boxes: Vec<DetectedBox>, overlap_threshold: f32) -> 
 }
 
 pub fn crop_margin(image: &RgbImage) -> RgbImage {
-    let gray: GrayImage = image::imageops::grayscale(image);
-    let (min_value, max_value) = gray.pixels().fold((255u8, 0u8), |(min, max), pixel| {
-        (min.min(pixel.0[0]), max.max(pixel.0[0]))
+    // OpenCV BT.601 RGB-to-gray coefficients, rather than image's Rec.709.
+    let gray: Vec<u8> = image
+        .pixels()
+        .map(|p| {
+            ((9798u32 * p[0] as u32 + 19235u32 * p[1] as u32 + 3735u32 * p[2] as u32 + 16384) >> 15)
+                as u8
+        })
+        .collect();
+    let (min_value, max_value) = gray.iter().fold((255u8, 0u8), |(min, max), &pixel| {
+        (min.min(pixel), max.max(pixel))
     });
     if max_value == min_value {
         return image.clone();
@@ -111,11 +118,11 @@ pub fn crop_margin(image: &RgbImage) -> RgbImage {
     let (mut x_min, mut y_min) = (image.width(), image.height());
     let (mut x_max, mut y_max) = (0, 0);
     let mut found = false;
-    for (x, y, pixel) in gray.enumerate_pixels() {
-        let normalized = ((pixel.0[0] as f32 - min_value as f32)
-            / (max_value as f32 - min_value as f32)
+    for (index, pixel) in gray.into_iter().enumerate() {
+        let (x, y) = (index as u32 % image.width(), index as u32 / image.width());
+        let normalized = ((pixel as f64 - min_value as f64) / (max_value as f64 - min_value as f64)
             * 255.0) as u8;
-        if normalized < 200 {
+        if normalized <= 200 {
             x_min = x_min.min(x);
             x_max = x_max.max(x);
             y_min = y_min.min(y);
@@ -128,8 +135,30 @@ pub fn crop_margin(image: &RgbImage) -> RgbImage {
     }
     let width = (x_max - x_min + 1).min(image.width() - x_min);
     let height = (y_max - y_min + 1).min(image.height() - y_min);
-    if width == 0 || height == 0 {
+    if width <= 2 || height <= 2 {
         return image.clone();
     }
     image::imageops::crop_imm(image, x_min, y_min, width, height).to_image()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formula_margins_use_bt601_inclusive_threshold_and_two_pixel_guard() {
+        let mut image = RgbImage::from_pixel(7, 5, image::Rgb([255; 3]));
+        for y in 1..4 {
+            for x in 3..6 {
+                image.put_pixel(x, y, image::Rgb([0; 3]));
+            }
+        }
+        image.put_pixel(2, 1, image::Rgb([200; 3]));
+        image.put_pixel(1, 1, image::Rgb([120, 255, 0]));
+        image.put_pixel(0, 1, image::Rgb([201; 3]));
+        assert_eq!(crop_margin(&image).dimensions(), (5, 3));
+        let mut single = RgbImage::from_pixel(5, 5, image::Rgb([255; 3]));
+        single.put_pixel(2, 2, image::Rgb([0; 3]));
+        assert_eq!(crop_margin(&single).dimensions(), (5, 5));
+    }
 }

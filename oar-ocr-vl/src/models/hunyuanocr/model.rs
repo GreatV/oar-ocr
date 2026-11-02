@@ -1506,14 +1506,10 @@ impl HunyuanOcr {
     }
 }
 
-fn build_prompt(instruction: &str, version: HunyuanOcrVersion) -> String {
-    // V1.0's reference invocation supplies an empty system message, which the
-    // template renders as placeholder no.3. V1.5's official invocation starts
-    // directly with the user message and therefore omits that token.
-    let system_prefix = match version {
-        HunyuanOcrVersion::V1 => "<｜hy_place▁holder▁no▁3｜>",
-        HunyuanOcrVersion::V1_5 => "",
-    };
+fn build_prompt(instruction: &str, _version: HunyuanOcrVersion) -> String {
+    // Both benchmark recipes supply an empty system turn. The V1.5 minimal
+    // HF example omits it, but its benchmark clients include placeholder no.3.
+    let system_prefix = "<｜hy_place▁holder▁no▁3｜>";
     format!(
         "<｜hy_begin▁of▁sentence｜>{system_prefix}\
 <｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>{instruction}\
@@ -1754,10 +1750,9 @@ mod tests {
     }
 
     #[test]
-    fn v15_prompt_omits_legacy_empty_system_token() {
+    fn v15_prompt_keeps_the_benchmark_empty_system_turn() {
         let prompt = build_prompt("read", HunyuanOcrVersion::V1_5);
-        assert!(prompt.starts_with("<｜hy_begin▁of▁sentence｜><｜hy_place▁holder▁no▁100｜>"));
-        assert!(!prompt.contains("<｜hy_place▁holder▁no▁3｜>"));
+        assert!(prompt.starts_with("<｜hy_begin▁of▁sentence｜><｜hy_place▁holder▁no▁3｜>"));
         assert!(prompt.ends_with("read<｜hy_User｜>"));
     }
 

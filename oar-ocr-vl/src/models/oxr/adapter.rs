@@ -99,8 +99,7 @@ impl RecognitionBackend for Oxr {
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             supports_chart: false,
-            // Repeated source rows/lines are valid; never delete them with
-            // a generic transcript repetition heuristic.
+            // Repeated rows and lines are real content in OXR output.
             truncate_repetitive_output: false,
             ..BackendCapabilities::default()
         }
@@ -181,7 +180,14 @@ fn format_region(label: &str, task: RecognitionTask, raw: &str) -> String {
                 format!("$$\n{body}\n$$")
             }
         }
-        Ok(OxrTask::Table) => raw.trim().to_string(),
+        Ok(OxrTask::Table) => {
+            let text = raw.trim();
+            if text.starts_with("```") {
+                strip_code_fence(text).trim().to_string()
+            } else {
+                text.to_string()
+            }
+        }
         _ => {
             let mut text = String::with_capacity(raw.len());
             for ch in raw.trim().chars() {
@@ -199,6 +205,11 @@ mod tests {
     use super::*;
     #[test]
     fn native_tasks_preserve_code_indentation_and_chemical_notation() {
+        let embedded = "<table><tr><td>```literal```</td></tr></table>";
+        assert_eq!(
+            format_region("table", RecognitionTask::Table, embedded),
+            embedded
+        );
         assert_eq!(
             task_for_label("Code Block", RecognitionTask::Ocr).unwrap(),
             OxrTask::Code
@@ -244,6 +255,14 @@ mod tests {
         assert_eq!(
             format_region("text", RecognitionTask::Ocr, "A\n\nB  C"),
             "A\nB  C"
+        );
+        assert_eq!(
+            format_region(
+                "table",
+                RecognitionTask::Table,
+                "```html\n<table></table>\n```"
+            ),
+            "<table></table>"
         );
     }
 }

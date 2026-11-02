@@ -48,6 +48,11 @@ fn default_tile_size() -> u32 {
 impl JinaOcrProcessorConfig {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
         let cfg: Self = load_json_config(path, "JinaOCR", "processor_config.json")?;
+        if !cfg.crop_mode {
+            return Err(Error::Config {
+                message: "JinaOCR crop_mode=false uses a 640-pixel global view, which this runtime does not support".into(),
+            });
+        }
         if cfg.base_size != BASE_SIZE {
             return Err(Error::Config {
                 message: format!(
@@ -260,6 +265,10 @@ mod tests {
         assert_eq!(inputs.tiles.dims(), &[0, 3, 640, 640]);
         // 16*17 + 1 = 273 global tokens only.
         assert_eq!(inputs.num_image_tokens, 273);
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("processor_config.json");
+        std::fs::write(&path, r#"{"crop_mode":false}"#)?;
+        assert!(JinaOcrProcessorConfig::from_path(&path).is_err());
         Ok(())
     }
 

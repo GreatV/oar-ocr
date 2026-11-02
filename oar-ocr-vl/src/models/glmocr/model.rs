@@ -37,6 +37,7 @@ pub struct GlmOcr {
     lm_head: Linear,
     eos_token_ids: Vec<u32>,
     image_token_id: u32,
+    repetition_penalty: f32,
     // Must stay the last field: the captured decoder graphs read the LM head
     // owned here, so this guard drops last and drains CUDA errors the head's
     // free may stash (see CudaGraphDrainGuard).
@@ -132,9 +133,17 @@ impl GlmOcr {
             lm_head,
             eos_token_ids,
             image_token_id,
+            repetition_penalty: 1.1,
             #[cfg(feature = "cuda")]
             _drain_guard,
         })
+    }
+
+    /// Set the presence-based logit penalty over prompt and generated tokens.
+    /// The SDK default is `1.1`; use `1.0` for unpenalized greedy decoding.
+    pub fn with_repetition_penalty(mut self, penalty: f32) -> Self {
+        self.repetition_penalty = penalty;
+        self
     }
 
     /// Generate OCR output for one or more images with optional instructions.
@@ -318,7 +327,7 @@ impl GlmOcr {
 
             let generated = self.generate_ar_tokens(
                 &hidden,
-                seq_len,
+                &input_ids,
                 rope_delta,
                 max_new_tokens,
                 step_top.as_deref_mut(),
@@ -333,11 +342,12 @@ impl GlmOcr {
     fn generate_ar_tokens(
         &self,
         prompt_hidden: &Tensor,
-        seq_len: usize,
+        prompt_ids: &[u32],
         rope_delta: i64,
         max_new_tokens: usize,
         mut step_top: Option<&mut Vec<[(u32, f32); 3]>>,
     ) -> Result<Vec<u32>, Error> {
+        let seq_len = prompt_ids.len();
         let last = prompt_hidden.i((0, seq_len - 1, ..)).map_err(|e| {
             candle_to_ocr_processing(
                 crate::error::ProcessingStage::TensorOperation,
@@ -347,10 +357,12 @@ impl GlmOcr {
         })?;
         let mut logits = self.logits_from_hidden(&last)?;
         let mut generated = Vec::with_capacity(max_new_tokens);
+        let mut history = prompt_ids.to_vec();
 
         for (step, pos) in (seq_len as i64..).take(max_new_tokens).enumerate() {
+            let adjusted = penalize_logits(&logits, &history, self.repetition_penalty)?;
             if let Some(step_top) = step_top.as_deref_mut() {
-                step_top.push(top3(&logits).map_err(|e| {
+                step_top.push(top3(&adjusted).map_err(|e| {
                     candle_to_ocr_processing(
                         crate::error::ProcessingStage::TensorOperation,
                         "GLM-OCR: trace logits",
@@ -358,7 +370,7 @@ impl GlmOcr {
                     )
                 })?);
             }
-            let tok = logits
+            let tok = adjusted
                 .argmax(D::Minus1)
                 .and_then(|t| t.to_scalar::<u32>())
                 .map_err(|e| {
@@ -372,6 +384,7 @@ impl GlmOcr {
                 break;
             }
             generated.push(tok);
+            history.push(tok);
             if step + 1 == max_new_tokens {
                 break;
             }
@@ -404,17 +417,20 @@ impl GlmOcr {
                 e,
             )
         })?;
-        let mut current_token = self
-            .logits_from_hidden(&last)?
-            .argmax(D::Minus1)
-            .and_then(|token| token.to_scalar::<u32>())
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    crate::error::ProcessingStage::TensorOperation,
-                    "GLM-OCR: initial MTP target argmax",
-                    e,
-                )
-            })?;
+        let mut current_token = penalize_logits(
+            &self.logits_from_hidden(&last)?,
+            prompt_ids,
+            self.repetition_penalty,
+        )?
+        .argmax(D::Minus1)
+        .and_then(|token| token.to_scalar::<u32>())
+        .map_err(|e| {
+            candle_to_ocr_processing(
+                crate::error::ProcessingStage::TensorOperation,
+                "GLM-OCR: initial MTP target argmax",
+                e,
+            )
+        })?;
         if max_new_tokens == 0 || self.eos_token_ids.contains(&current_token) {
             return Ok(Vec::new());
         }
@@ -457,14 +473,34 @@ impl GlmOcr {
             let query_embeds = self.text.embed(&query)?;
             let query_positions =
                 text_position_ids(target_position, GLM_MTP_QUERY_LEN, &self.device)?;
-            let (target_hidden, target_tokens) = self.text.forward_verification_tokens(
+            let (target_hidden, _unpenalized_tokens) = self.text.forward_verification_tokens(
                 &query_embeds,
                 &query_positions,
                 &self.lm_head,
             )?;
-            let target_tokens = target_tokens.to_vec1::<u32>().map_err(|e| {
-                candle_to_ocr_inference("GLM-OCR", "copy MTP verification tokens", e)
-            })?;
+            // Captured verification returns unpenalized argmax IDs. Reproject
+            // its hidden states and apply the same target policy as AR, with
+            // each row seeing only its preceding proposal prefix.
+            let target_logits = self
+                .lm_head
+                .forward(&target_hidden)
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "penalized MTP projection", e))?;
+            let mut target_tokens = Vec::with_capacity(GLM_MTP_QUERY_LEN);
+            let mut history = prompt_ids.to_vec();
+            history.extend_from_slice(&generated);
+            for row in 0..GLM_MTP_QUERY_LEN {
+                let logits = target_logits
+                    .i((0, row, ..))
+                    .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP penalty row", e))?;
+                let token = penalize_logits(&logits, &history, self.repetition_penalty)?
+                    .argmax(D::Minus1)
+                    .and_then(|t| t.to_scalar::<u32>())
+                    .map_err(|e| candle_to_ocr_inference("GLM-OCR", "penalized MTP argmax", e))?;
+                target_tokens.push(token);
+                if let Some(&draft) = drafts.get(row) {
+                    history.push(draft);
+                }
+            }
             if target_tokens.len() != GLM_MTP_QUERY_LEN {
                 return Err(Error::InvalidInput {
                     message: format!(
@@ -778,6 +814,58 @@ impl GlmOcr {
     }
 }
 
+fn penalize_logits(logits: &Tensor, history: &[u32], penalty: f32) -> Result<Tensor, Error> {
+    if !penalty.is_finite() || penalty <= 0. {
+        return Err(Error::invalid_input(
+            "GLM-OCR repetition penalty must be finite and positive",
+        ));
+    }
+    if penalty == 1. {
+        return Ok(logits.clone());
+    }
+    let mut unique = history.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    let adjusted = logits
+        .to_dtype(DType::F32)
+        .and_then(|t| t.copy())
+        .map_err(|e| candle_to_ocr_inference("GLM-OCR", "copy penalty logits", e))?;
+    #[cfg(feature = "cuda")]
+    if adjusted.device().is_cuda() {
+        use crate::runtime::cuda::dynamic_kv::RepetitionPenaltyF32;
+        let size = adjusted.elem_count();
+        let adjusted = adjusted
+            .reshape((1, size))
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "reshape penalty logits", e))?;
+        if !unique.is_empty() {
+            let count = unique.len();
+            let ids = Tensor::from_vec(unique, (1, count), logits.device())
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "penalty history IDs", e))?;
+            adjusted
+                .inplace_op2(&ids, &RepetitionPenaltyF32 { penalty })
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "GPU repetition penalty", e))?;
+        }
+        return adjusted
+            .flatten_all()
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "flatten penalty logits", e));
+    }
+    let mut values = adjusted
+        .to_vec1::<f32>()
+        .map_err(|e| candle_to_ocr_inference("GLM-OCR", "read penalty logits", e))?;
+    for id in unique {
+        if let Some(value) = values.get_mut(id as usize) {
+            *value = if *value < 0. {
+                *value * penalty
+            } else {
+                *value / penalty
+            };
+        }
+    }
+    let size = values.len();
+    Tensor::from_vec(values, size, logits.device())
+        .map_err(|e| candle_to_ocr_inference("GLM-OCR", "penalized logits", e))
+}
+
 fn token_tensor(token: u32, device: &Device) -> Result<Tensor, Error> {
     Tensor::new(&[token], device)
         .and_then(|token| token.reshape((1, 1)))
@@ -930,4 +1018,24 @@ fn build_position_ids(
         )
     })?;
     Ok((position_ids, max_pos))
+}
+
+#[cfg(test)]
+mod repetition_tests {
+    use super::*;
+
+    #[test]
+    fn sdk_penalty_is_presence_based_for_prompt_and_proposal_prefixes() {
+        let logits = Tensor::new(&[2f32, -2., 1.9, -1.9], &Device::Cpu).unwrap();
+        let prompt = penalize_logits(&logits, &[0, 0, 1], 1.1)
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert_eq!(prompt, vec![2. / 1.1, -2. * 1.1, 1.9, -1.9]);
+        let proposal = penalize_logits(&logits, &[0, 1, 2], 1.1)
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert_eq!(proposal[2], 1.9 / 1.1);
+    }
 }

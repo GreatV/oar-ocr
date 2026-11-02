@@ -44,9 +44,9 @@ pub struct OxrGenerationOptions {
     pub max_new_tokens: usize,
     pub min_pixels: u32,
     pub max_pixels: u32,
-    /// Applies only to generated tokens, matching reference generation from
-    /// input embeddings. Prompt IDs are not penalized. One disables the penalty;
-    /// generation never changes it automatically.
+    /// Applies only to generated tokens; prompt IDs are not penalized. This
+    /// differs from the reference vLLM service when the penalty is not one.
+    /// 1.0 disables the penalty.
     pub repetition_penalty: f32,
 }
 

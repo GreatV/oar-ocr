@@ -3,13 +3,17 @@
 use super::{DEFAULT_MAX_NEW_TOKENS, MonkeyOcrV2, MonkeyOcrV2Task};
 use crate::api::error::Error;
 use crate::api::page_parser::PageParser;
-use crate::document::page::PageDocument;
+use crate::document::page::{DocumentBlock, PageDocument, ParseDiagnostic};
 use image::RgbImage;
 
 /// MonkeyOCRv2 complete-page parsing options.
 #[derive(Debug, Clone)]
 pub struct MonkeyOcrV2ParseOptions {
+    /// Page task. `EndToEnd` uses the model's selected page pipeline; disable
+    /// two-stage parsing on the model to request the one-pass protocol here.
     pub task: MonkeyOcrV2Task,
+    /// Per-request cap, further bounded by layout=4096 and recognition=5000
+    /// when the native two-stage pipeline is selected.
     pub max_new_tokens: usize,
 }
 
@@ -26,6 +30,9 @@ impl PageParser for MonkeyOcrV2 {
     type Options = MonkeyOcrV2ParseOptions;
 
     fn parse_page(&self, image: &RgbImage, options: &Self::Options) -> Result<PageDocument, Error> {
+        if self.two_stage_parsing && options.task == MonkeyOcrV2Task::EndToEnd {
+            return self.parse_two_stage(image, options.max_new_tokens);
+        }
         let raw = self
             .generate(
                 std::slice::from_ref(image),
@@ -39,9 +46,132 @@ impl PageParser for MonkeyOcrV2 {
     }
 }
 
+impl MonkeyOcrV2 {
+    /// Parse a page with the reference layout and per-region recognition stages.
+    ///
+    /// The caller cap applies to each request, up to 4096 layout tokens and
+    /// 5000 recognition tokens. Crops are rounded in source-image coordinates.
+    /// Raw output contains the layout reply; recognized contents live in blocks.
+    /// Picture boxes are kept without exporting crop files. Dewarp is not applied.
+    pub fn parse_two_stage(
+        &self,
+        image: &RgbImage,
+        max_new_tokens: usize,
+    ) -> Result<PageDocument, Error> {
+        if image.width() == 0 || image.height() == 0 {
+            return Err(Error::invalid_input(
+                "MonkeyOCRv2 cannot parse an empty page",
+            ));
+        }
+        let raw = self
+            .generate(
+                std::slice::from_ref(image),
+                &[MonkeyOcrV2Task::Layout],
+                max_new_tokens.min(4096),
+            )?
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::invalid_input("MonkeyOCRv2 returned no layout result"))??;
+        finish_two_stage(
+            image,
+            parse_output(raw, MonkeyOcrV2Task::Layout),
+            max_new_tokens,
+            |crop, task, budget| {
+                self.generate(&[crop], &[task], budget)?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Error::invalid_input("MonkeyOCRv2 returned no region result"))?
+            },
+        )
+    }
+}
+
+fn region_task(label: &str) -> Option<MonkeyOcrV2Task> {
+    match label {
+        "text" | "figure_title" | "doc_title" | "paragraph_title" | "header" | "footer" => {
+            Some(MonkeyOcrV2Task::Text)
+        }
+        "formula" => Some(MonkeyOcrV2Task::Formula),
+        "table" => Some(MonkeyOcrV2Task::Table),
+        _ => None,
+    }
+}
+
+fn region_crop(image: &RgbImage, block: &DocumentBlock) -> RgbImage {
+    let (width, height) = image.dimensions();
+    let x1 = (block.bbox[0] * width as f32)
+        .round_ties_even()
+        .clamp(0., (width - 1) as f32) as u32;
+    let y1 = (block.bbox[1] * height as f32)
+        .round_ties_even()
+        .clamp(0., (height - 1) as f32) as u32;
+    let x2 = (block.bbox[2] * width as f32)
+        .round_ties_even()
+        .clamp((x1 + 1) as f32, width as f32) as u32;
+    let y2 = (block.bbox[3] * height as f32)
+        .round_ties_even()
+        .clamp((y1 + 1) as f32, height as f32) as u32;
+    image::imageops::crop_imm(image, x1, y1, x2 - x1, y2 - y1).to_image()
+}
+
+fn finish_two_stage(
+    image: &RgbImage,
+    mut page: PageDocument,
+    cap: usize,
+    mut recognize: impl FnMut(RgbImage, MonkeyOcrV2Task, usize) -> Result<String, Error>,
+) -> Result<PageDocument, Error> {
+    if image.width() == 0 || image.height() == 0 {
+        return Err(Error::invalid_input(
+            "MonkeyOCRv2 cannot crop an empty page",
+        ));
+    }
+    // MonkeyOCRv2 core_runner.py _build_page_tasks/_format_block_fields
+    // (Apache-2.0). Bound retained crop memory by recognizing one at a time.
+    let mut chunks = Vec::new();
+    for (index, block) in page.blocks.iter_mut().enumerate() {
+        let Some(task) = region_task(&block.block_type) else {
+            continue;
+        };
+        match recognize(region_crop(image, block), task, cap.min(5000)) {
+            Ok(raw) => {
+                let content = match task {
+                    MonkeyOcrV2Task::Formula => super::formatting::format_formula(&raw),
+                    MonkeyOcrV2Task::Table => super::formatting::otsl_to_html(&raw),
+                    _ => raw.trim().to_string(),
+                };
+                if !content.trim().is_empty()
+                    && !matches!(block.block_type.as_str(), "header" | "footer")
+                {
+                    let prefix = match block.block_type.as_str() {
+                        "doc_title" => "# ",
+                        "paragraph_title" => "## ",
+                        _ => "",
+                    };
+                    chunks.push(if prefix.is_empty() {
+                        content.clone()
+                    } else {
+                        content
+                            .lines()
+                            .map(|line| format!("{prefix}{line}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    });
+                }
+                block.content = Some(content);
+            }
+            Err(error) => page.diagnostics.push(ParseDiagnostic {
+                block_index: Some(index),
+                stage: "recognition".into(),
+                message: error.to_string(),
+            }),
+        }
+    }
+    page.markdown = Some(chunks.join("\n\n"));
+    Ok(page)
+}
+
 fn parse_output(raw: String, task: MonkeyOcrV2Task) -> PageDocument {
-    use crate::render::{table::convert_otsl_to_html, text::strip_math_wrappers};
-    use crate::{DocumentBlock, ParseDiagnostic};
+    use super::formatting::{format_formula, otsl_to_html};
     let mut page = PageDocument {
         raw_output: Some(raw.clone()),
         ..PageDocument::default()
@@ -51,8 +181,8 @@ fn parse_output(raw: String, task: MonkeyOcrV2Task) -> PageDocument {
         MonkeyOcrV2Task::Text | MonkeyOcrV2Task::Formula | MonkeyOcrV2Task::Table
     ) {
         page.markdown = Some(match task {
-            MonkeyOcrV2Task::Table => convert_otsl_to_html(&raw),
-            MonkeyOcrV2Task::Formula => format!("$$\n{}\n$$", strip_math_wrappers(&raw)),
+            MonkeyOcrV2Task::Table => otsl_to_html(&raw),
+            MonkeyOcrV2Task::Formula => format_formula(&raw),
             _ => raw.trim().to_string(),
         });
         return page;
@@ -137,7 +267,7 @@ fn parse_output(raw: String, task: MonkeyOcrV2Task) -> PageDocument {
             .and_then(|v| v.as_str())
             .map(|content| {
                 if label == "table" {
-                    convert_otsl_to_html(content)
+                    otsl_to_html(content)
                 } else {
                     content.trim().to_string()
                 }
@@ -218,6 +348,40 @@ fn normalize_literals(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_stage_routes_rounded_crops_and_retains_region_failures() {
+        let raw = "[{'label':'Title','bbox':[350,0,1000,200]}, {'label':'Formula','bbox':[0,200,1000,500]}, {'label':'Page-footer','bbox':[0,800,1000,900]}, {'label':'Text','bbox':[0,900,1000,1000]}]";
+        let mut calls = 0;
+        let page = finish_two_stage(
+            &RgbImage::new(10, 10),
+            parse_output(raw.into(), MonkeyOcrV2Task::Layout),
+            777,
+            |crop, task, budget| {
+                assert_eq!(budget, 777);
+                calls += 1;
+                match calls {
+                    1 => {
+                        assert_eq!(crop.dimensions(), (6, 2));
+                        Ok("Heading".into())
+                    }
+                    2 => {
+                        assert_eq!(task, MonkeyOcrV2Task::Formula);
+                        Ok(r"x\eqno (3)".into())
+                    }
+                    3 => Ok("hidden margin".into()),
+                    _ => Err(Error::invalid_input("region failed")),
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 4);
+        assert_eq!(page.blocks.len(), 4);
+        assert_eq!(page.blocks[2].content.as_deref(), Some("hidden margin"));
+        assert_eq!(page.markdown.as_deref(), Some("# Heading\n\n$$\nx\n$$\n3"));
+        assert_eq!(page.raw_output.as_deref(), Some(raw));
+        assert_eq!(page.diagnostics[0].block_index, Some(3));
+    }
     #[test]
     fn parses_literal_records_and_preserves_raw_output() {
         let raw = r#"[{'label':'Title','bbox':[0,0,1000,100],'content':"A title"}, {'label':'Text','bbox':[0,100,1000,200],'content':'a \\times b'}]"#;

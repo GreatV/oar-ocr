@@ -24,13 +24,12 @@
 mod utils;
 
 use clap::{Parser, ValueEnum};
-use image::imageops;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
 
 use oar_ocr_vl::utils::convert_otsl_to_html;
-use oar_ocr_vl::utils::image::load_image;
+use oar_ocr_vl::utils::image::{load_image, pil_bicubic_resize};
 use oar_ocr_vl::utils::parse_device;
 use oar_ocr_vl::{TeleOcr, TeleOcrTask};
 
@@ -159,7 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The model card's quickstart resizes layout inputs to 1036x1036
         // (bicubic) before the layout prompts.
         let model_input = match task.resize_square() {
-            Some(side) => imageops::resize(&rgb_img, side, side, imageops::FilterType::CatmullRom),
+            Some(side) => pil_bicubic_resize(&rgb_img, side, side)?,
             None => rgb_img,
         };
 

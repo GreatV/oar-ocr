@@ -6,6 +6,7 @@
 
 mod adapter;
 mod config;
+mod formatting;
 mod model;
 mod parser;
 mod processing;

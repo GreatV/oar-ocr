@@ -1,6 +1,6 @@
 //! Region-recognition adapter for TeleOCR.
 
-use super::{TeleOcr, TeleOcrTask, postprocess_formula};
+use super::{TeleOcr, postprocess_formula};
 use crate::api::error::{BatchResult, Error};
 use crate::api::recognition::{BackendCapabilities, RecognitionBackend, RecognitionTask};
 use crate::render::text::truncate_repetitive_content;
@@ -9,15 +9,23 @@ use image::RgbImage;
 
 fn prompt(task: RecognitionTask) -> &'static str {
     match task {
-        RecognitionTask::Ocr | RecognitionTask::Chart => TeleOcrTask::Text.prompt(),
-        RecognitionTask::Table => TeleOcrTask::Table.prompt(),
-        RecognitionTask::Formula => TeleOcrTask::Formula.prompt(),
+        RecognitionTask::Ocr => "\nPlease output the text content from the image.",
+        RecognitionTask::Chart => {
+            "\nThis is a scientific figure. Please extract the table implied by this figure."
+        }
+        RecognitionTask::Table => {
+            "\nThis is the image of a table. Please output the table in OTSL format."
+        }
+        RecognitionTask::Formula => {
+            "\nPlease write out the expression of the formula in the image using LaTeX format."
+        }
     }
 }
 
 fn postprocess(task: RecognitionTask, raw: &str) -> String {
     match task {
         RecognitionTask::Formula => postprocess_formula(raw),
+        RecognitionTask::Chart => crate::render::table::convert_otsl_to_html(raw),
         _ => raw.trim().to_string(),
     }
 }
@@ -69,5 +77,26 @@ impl RecognitionBackend for TeleOcr {
             table_output_is_otsl: true,
             ..BackendCapabilities::default()
         }
+    }
+
+    fn postprocess_region_output(
+        &self,
+        _label: &str,
+        task: RecognitionTask,
+        raw: &str,
+    ) -> Option<String> {
+        (task == RecognitionTask::Chart).then(|| raw.trim().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pipeline_prompts_and_chart_output_use_the_region_recipe() {
+        assert!(prompt(RecognitionTask::Ocr).starts_with('\n'));
+        assert!(prompt(RecognitionTask::Chart).contains("scientific figure"));
+        assert!(postprocess(RecognitionTask::Chart, "<fcel>A<nl>").contains("<td>A</td>"));
     }
 }

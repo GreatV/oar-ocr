@@ -662,9 +662,30 @@ fn select_greedy_token(logits: &Tensor) -> Result<u32, Error> {
 }
 
 /// Official whole-page post-processing: collapse degenerate repeated tails,
-/// then convert OTSL table blocks to HTML tables.
+/// normalize LaTeX delimiters, then convert OTSL table blocks to HTML tables.
 pub fn finalize_markdown(text: &str) -> String {
-    convert_markdown_otsl_tables(&clean_truncated_repeats(text))
+    static DISPLAY_DOLLARS: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?s)\$\$?\s*\\\[\s*(.*?)\s*\\\]\s*\$\$?").unwrap());
+    static INLINE_DOLLARS: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?s)\$\s*\\\(\s*(.*?)\s*\\\)\s*\$").unwrap());
+    static DISPLAY: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)\\\[\s*(.*?)\s*\\\]").unwrap());
+    static INLINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)\\\(\s*(.*?)\s*\\\)").unwrap());
+    let text = clean_truncated_repeats(text)
+        .replace(r"\[\[", r"\[")
+        .replace(r"\]\]", r"\]");
+    let text = DISPLAY_DOLLARS.replace_all(&text, |caps: &regex::Captures<'_>| {
+        format!(" $$ {} $$ ", &caps[1])
+    });
+    let text = INLINE_DOLLARS.replace_all(&text, |caps: &regex::Captures<'_>| {
+        format!(" $ {} $", &caps[1])
+    });
+    let text = DISPLAY.replace_all(&text, |caps: &regex::Captures<'_>| {
+        format!(" $$ {} $$ ", &caps[1])
+    });
+    let text = INLINE.replace_all(&text, |caps: &regex::Captures<'_>| {
+        format!(" $ {} $", &caps[1])
+    });
+    convert_markdown_otsl_tables(&text)
 }
 
 /// Convert OTSL table blocks inside whole-page Markdown to HTML tables,
@@ -797,6 +818,10 @@ mod tests {
 
     #[test]
     fn otsl_blocks_in_markdown_become_html_tables() {
+        assert_eq!(
+            finalize_markdown(r"A \( x \) B \[ y \]"),
+            "A  $ x $ B  $$ y $$ "
+        );
         let otsl = "<fcel>Item<fcel>Qty<nl><fcel>Tea<fcel>2<nl>";
         let markdown = format!("# Receipt\n\n{otsl}\n\nThat is all.");
         let converted = convert_markdown_otsl_tables(&markdown);

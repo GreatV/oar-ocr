@@ -11,6 +11,7 @@
 
 mod adapter;
 mod config;
+mod layout;
 mod model;
 mod parser;
 pub(crate) use crate::backbones::sdar as text;

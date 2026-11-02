@@ -2,7 +2,7 @@ use super::config::{HunyuanOcrImageProcessorConfig, HunyuanOcrVersion, HunyuanOc
 use crate::error::Error;
 use crate::utils::{
     candle_to_ocr_processing,
-    image::{clamp_to_max_image_size, image_to_chw, smart_resize},
+    image::{image_to_chw, smart_resize},
 };
 use candle_core::{DType, Device, Tensor};
 use image::RgbImage;
@@ -17,74 +17,11 @@ pub(crate) fn resized_dimensions(
     height: u32,
     width: u32,
     cfg: &HunyuanOcrImageProcessorConfig,
-    vision_cfg: &HunyuanOcrVisionConfig,
-    version: HunyuanOcrVersion,
+    _vision_cfg: &HunyuanOcrVisionConfig,
+    _version: HunyuanOcrVersion,
 ) -> Result<(u32, u32), Error> {
     let factor = (cfg.patch_size * cfg.merge_size) as u32;
-    match version {
-        HunyuanOcrVersion::V1 => {
-            let (rh, rw) = smart_resize_token_limited(
-                height,
-                width,
-                factor,
-                cfg.min_pixels,
-                cfg.max_pixels,
-                vision_cfg.img_max_token_num,
-            )?;
-            clamp_to_max_image_size(rh, rw, factor, vision_cfg.max_image_size)
-        }
-        HunyuanOcrVersion::V1_5 => {
-            smart_resize(height, width, factor, cfg.min_pixels, cfg.max_pixels)
-        }
-    }
-}
-
-pub fn smart_resize_token_limited(
-    height: u32,
-    width: u32,
-    factor: u32,
-    min_pixels: u32,
-    max_pixels: u32,
-    max_tokens: usize,
-) -> Result<(u32, u32), Error> {
-    if factor == 0 {
-        return Err(Error::InvalidInput {
-            message: "HunyuanOCR smart_resize_token_limited: factor must be > 0".to_string(),
-        });
-    }
-    let (mut rh, mut rw) = smart_resize(height, width, factor, min_pixels, max_pixels)?;
-
-    // Token count in HunYuanVL is based on merged grid with an extra newline token per row:
-    // tokens = Hm * (Wm + 1)
-    loop {
-        let hm = (rh / factor) as usize;
-        let wm = (rw / factor) as usize;
-        let tokens = hm.saturating_mul(wm.saturating_add(1));
-        if tokens <= max_tokens {
-            break;
-        }
-
-        // Reduce the larger axis (in merged-grid units) first to keep aspect ratio roughly intact.
-        if wm >= hm {
-            if rw <= factor {
-                return Err(Error::InvalidInput {
-                    message: "HunyuanOCR smart_resize_token_limited: cannot satisfy max_tokens"
-                        .to_string(),
-                });
-            }
-            rw -= factor;
-        } else {
-            if rh <= factor {
-                return Err(Error::InvalidInput {
-                    message: "HunyuanOCR smart_resize_token_limited: cannot satisfy max_tokens"
-                        .to_string(),
-                });
-            }
-            rh -= factor;
-        }
-    }
-
-    Ok((rh, rw))
+    smart_resize(height, width, factor, cfg.min_pixels, cfg.max_pixels)
 }
 
 pub fn preprocess_image(
@@ -176,7 +113,8 @@ mod tests {
     use image::RgbImage;
 
     #[test]
-    fn test_v1_preprocess_clamps_to_max_image_size() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_v1_preprocess_uses_area_bounds_without_a_side_cap()
+    -> Result<(), Box<dyn std::error::Error>> {
         let cfg = HunyuanOcrImageProcessorConfig {
             min_pixels: 0,
             max_pixels: 100_000_000,
@@ -215,8 +153,11 @@ mod tests {
             DType::F32,
         )?;
         let (_b, _c, rh, rw) = out.pixel_values.dims4()?;
-        assert!(rh <= vision_cfg.max_image_size);
-        assert!(rw <= vision_cfg.max_image_size);
+        assert!(rh > vision_cfg.max_image_size || rw > vision_cfg.max_image_size);
+        assert_eq!(
+            resized_dimensions(2048, 2048, &cfg, &vision_cfg, HunyuanOcrVersion::V1)?,
+            (2048, 2048)
+        );
 
         let factor = cfg.patch_size * cfg.merge_size;
         assert_eq!(rh % factor, 0);

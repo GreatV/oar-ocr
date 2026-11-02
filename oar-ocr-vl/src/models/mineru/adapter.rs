@@ -12,7 +12,7 @@ fn prompt(task: RecognitionTask) -> &'static str {
         RecognitionTask::Ocr => "\nText Recognition:",
         RecognitionTask::Table => "\nTable Recognition:",
         RecognitionTask::Formula => "\nFormula Recognition:",
-        RecognitionTask::Chart => "\nDocument Parsing:",
+        RecognitionTask::Chart => "\nText Recognition:",
     }
 }
 
@@ -58,7 +58,37 @@ impl RecognitionBackend for MinerU {
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             table_output_is_otsl: true,
+            supports_chart: false,
             ..BackendCapabilities::default()
         }
+    }
+
+    fn postprocess_region_output(
+        &self,
+        label: &str,
+        task: RecognitionTask,
+        raw: &str,
+    ) -> Option<String> {
+        if task == RecognitionTask::Table {
+            return Some(crate::pipeline::mineru_table::mineru_otsl_to_html(raw));
+        }
+        let block = crate::DocumentBlock {
+            block_type: if task == RecognitionTask::Formula {
+                "equation"
+            } else {
+                label
+            }
+            .into(),
+            bbox: [0., 0., 1., 1.],
+            angle: None,
+            content: Some(raw.into()),
+        };
+        Some(
+            crate::pipeline::mineru_postprocess::postprocess_blocks(vec![block])
+                .into_iter()
+                .next()
+                .and_then(|b| b.content)
+                .unwrap_or_default(),
+        )
     }
 }

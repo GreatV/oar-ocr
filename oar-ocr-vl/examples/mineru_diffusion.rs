@@ -26,8 +26,9 @@ struct Args {
     single_pass: bool,
     #[arg(long)]
     prompt: Option<String>,
-    #[arg(long, default_value_t = 1024)]
-    gen_length: usize,
+    /// Token cap: 2048 for page parsing, 1024 for single-pass recognition.
+    #[arg(long)]
+    gen_length: Option<usize>,
     #[arg(long, default_value_t = 32)]
     block_length: usize,
     #[arg(long, default_value_t = 32)]
@@ -66,7 +67,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Model loaded in {:.2?}", load_start.elapsed());
 
     let generation = DiffusionGenerationConfig {
-        gen_length: args.gen_length,
+        gen_length: args
+            .gen_length
+            .unwrap_or(if args.single_pass { 1024 } else { 2048 }),
         block_length: args.block_length,
         denoising_steps: args.denoising_steps,
         dynamic_threshold: args.dynamic_threshold,

@@ -84,6 +84,7 @@ pub struct PaddleOcrVl {
     image_placeholder_token_id: u32,
     /// Assistant prefix derived from chat template (e.g., "Assistant: " vs "Assistant:\n")
     assistant_prefix: String,
+    pub(super) use_chart_recognition: bool,
     // Must stay the last field: the captured decoder graphs read the LM head
     // owned here, so this guard drops last and drains CUDA errors the head's
     // free may stash (see CudaGraphDrainGuard).
@@ -163,10 +164,42 @@ impl PaddleOcrVl {
             eos_token_id,
             sep_token_id,
             image_placeholder_token_id,
+            use_chart_recognition: false,
             assistant_prefix,
             #[cfg(feature = "cuda")]
             _drain_guard,
         })
+    }
+
+    /// Recognize chart regions in DocParser (default: disabled, matching PaddleX).
+    /// Explicit standalone `Chart` generation is always available.
+    pub fn with_chart_recognition(mut self, enabled: bool) -> Self {
+        self.use_chart_recognition = enabled;
+        self
+    }
+
+    pub(super) fn generate_pipeline_raw(
+        &self,
+        images: &[RgbImage],
+        tasks: &[PaddleOcrVlTask],
+        max_new_tokens: usize,
+    ) -> crate::error::BatchResult<String> {
+        if images.len() != tasks.len() {
+            return Err(Error::invalid_input(
+                "PaddleOCR-VL image and task counts differ",
+            ));
+        }
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut config = self.image_cfg.clone();
+        config.min_pixels = 112_896;
+        config.max_pixels = 1_003_520;
+        Ok(self
+            .generate_tokens_internal(images, tasks, max_new_tokens, None, Some(&config))?
+            .into_iter()
+            .map(|tokens| self.decode_tokens_raw(&tokens))
+            .collect())
     }
 
     /// Image-token count used to form padding-free document-parser batches.
@@ -238,7 +271,7 @@ impl PaddleOcrVl {
             });
         }
 
-        let results = self.generate_tokens_internal(images, tasks, max_new_tokens, None)?;
+        let results = self.generate_tokens_internal(images, tasks, max_new_tokens, None, None)?;
         Ok(results
             .into_iter()
             .enumerate()
@@ -268,7 +301,7 @@ impl PaddleOcrVl {
                 ),
             });
         }
-        self.generate_tokens_internal(images, tasks, max_new_tokens, None)
+        self.generate_tokens_internal(images, tasks, max_new_tokens, None, None)
     }
 
     /// Internal generation implementation supporting batched inference.
@@ -288,6 +321,7 @@ impl PaddleOcrVl {
                 &[task],
                 max_new_tokens,
                 Some(&mut step_top),
+                None,
             )?
             .into_iter()
             .next()
@@ -301,11 +335,17 @@ impl PaddleOcrVl {
         tasks: &[PaddleOcrVlTask],
         max_new_tokens: usize,
         mut step_top: Option<&mut Vec<[(u32, f32); 3]>>,
+        image_config: Option<&PaddleOcrVlImageProcessorConfig>,
     ) -> Result<Vec<Vec<u32>>, Error> {
         let batch_size = images.len();
 
-        let image_inputs =
-            processing::preprocess_tasks(images, tasks, &self.image_cfg, &self.device, self.dtype)?;
+        let image_inputs = processing::preprocess_tasks(
+            images,
+            tasks,
+            image_config.unwrap_or(&self.image_cfg),
+            &self.device,
+            self.dtype,
+        )?;
 
         // 2. Build prompts for each sample
         let mut all_input_ids: Vec<Vec<u32>> = Vec::with_capacity(batch_size);

@@ -499,7 +499,7 @@ fn build_request_prompt(counts: impl IntoIterator<Item = usize>, task_prompt: &s
         }
         prompt.push_str("<|vision_end|>");
     }
-    prompt.push_str(task_prompt);
+    prompt.push_str(task_prompt.trim_end());
     prompt.push_str("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
     prompt
 }
@@ -706,6 +706,10 @@ mod tests {
 
     #[test]
     fn official_prompt_has_exact_no_think_framing() {
+        assert_eq!(
+            build_request_prompt([2], "read \n\t"),
+            build_request_prompt([2], "read")
+        );
         let prompt = build_request_prompt([2], DEFAULT_PROMPT);
         assert!(prompt.starts_with(
             "<|im_start|>user\n<|vision_start|><|image_pad|><|image_pad|><|vision_end|>\nExtract"

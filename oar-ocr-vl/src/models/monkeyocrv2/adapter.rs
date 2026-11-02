@@ -42,4 +42,17 @@ impl RecognitionBackend for MonkeyOcrV2 {
             ..BackendCapabilities::default()
         }
     }
+
+    fn postprocess_region_output(
+        &self,
+        _label: &str,
+        task: RecognitionTask,
+        raw: &str,
+    ) -> Option<String> {
+        match task {
+            RecognitionTask::Table => Some(super::formatting::otsl_to_html(raw)),
+            RecognitionTask::Formula => Some(super::formatting::format_formula(raw)),
+            _ => None,
+        }
+    }
 }

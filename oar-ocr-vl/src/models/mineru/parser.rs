@@ -5,9 +5,9 @@ use crate::api::error::Error;
 use crate::api::page_parser::PageParser;
 use crate::document::page::{PageDocument, ParseDiagnostic};
 use crate::pipeline::mineru_layout::{
-    LAYOUT_IMAGE_SIZE, LAYOUT_PROMPT, parse_layout_output, prepare_for_extract,
+    LAYOUT_IMAGE_SIZE, LAYOUT_PROMPT, parse_layout_details, prepare_for_extract,
 };
-use crate::render::table::convert_otsl_to_html;
+use crate::pipeline::mineru_table::mineru_otsl_to_html;
 use crate::render::text::truncate_repetitive_content;
 use crate::runtime::image::pil_bicubic_resize;
 use image::RgbImage;
@@ -43,8 +43,17 @@ impl PageParser for MinerU {
             .next()
             .ok_or_else(|| Error::invalid_input("MinerU layout detection returned no result"))?;
         let raw_layout = self.decode_tokens(&layout_tokens)?;
-        let mut blocks = parse_layout_output(&raw_layout);
+        let records = parse_layout_details(&raw_layout);
+        let continuations: Vec<_> = records
+            .iter()
+            .filter(|(b, merge)| *merge && b.block_type == "text")
+            .map(|(b, _)| b.bbox)
+            .collect();
+        let mut blocks: Vec<_> = records.into_iter().map(|(block, _)| block).collect();
         let mut diagnostics = Vec::new();
+        if blocks.iter().any(|b| b.block_type == "chart") {
+            diagnostics.push(ParseDiagnostic { block_index: None, stage: "recognition".into(), message: "Chart recognition is disabled until Image Analysis replies are parsed; chart boxes are retained".into() });
+        }
 
         let (images, prompts, indices) = prepare_for_extract(
             image,
@@ -91,7 +100,7 @@ impl PageParser for MinerU {
                         let content = truncate_repetitive_content(&content, 10, 10, 10);
                         blocks[block_index].content =
                             Some(if blocks[block_index].block_type == "table" {
-                                convert_otsl_to_html(&content)
+                                mineru_otsl_to_html(&content)
                             } else {
                                 content.trim().to_string()
                             });
@@ -112,9 +121,43 @@ impl PageParser for MinerU {
             diagnostics,
             ..PageDocument::default()
         };
-        page.markdown = Some(page.render_markdown());
+        page.markdown = Some(render_with_continuations(&page, &continuations));
         Ok(page)
     }
+}
+
+fn render_with_continuations(page: &PageDocument, continuations: &[[f32; 4]]) -> String {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut last_text = None;
+    for block in &page.blocks {
+        let chunk = PageDocument {
+            blocks: vec![block.clone()],
+            ..PageDocument::default()
+        }
+        .render_markdown();
+        if chunk.trim().is_empty() {
+            continue;
+        }
+        if block.block_type == "text"
+            && continuations.contains(&block.bbox)
+            && let Some(index) = last_text
+        {
+            let previous: &mut String = &mut chunks[index];
+            if !chunk
+                .chars()
+                .any(|ch| matches!(ch, '\u{3400}'..='\u{4dbf}'|'\u{4e00}'..='\u{9fff}'))
+            {
+                previous.push(' ');
+            }
+            previous.push_str(&chunk);
+        } else {
+            if block.block_type == "text" {
+                last_text = Some(chunks.len());
+            }
+            chunks.push(chunk);
+        }
+    }
+    chunks.join("\n\n")
 }
 
 fn retry_individually(
@@ -143,4 +186,33 @@ fn retry_individually(
                 .ok_or_else(|| Error::invalid_input("MinerU returned no block result"))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::DocumentBlock;
+
+    #[test]
+    fn continuation_merges_the_last_text_even_across_a_table() {
+        let block = |kind: &str, y, text: &str| DocumentBlock {
+            block_type: kind.into(),
+            bbox: [0., y, 1., y + 0.1],
+            angle: None,
+            content: Some(text.into()),
+        };
+        let page = PageDocument {
+            blocks: vec![
+                block("text", 0., "First"),
+                block("table", 0.2, "<table><tr><td>T</td></tr></table>"),
+                block("text", 0.4, "second"),
+                block("text", 0.6, "中文"),
+            ],
+            ..PageDocument::default()
+        };
+        let markdown =
+            render_with_continuations(&page, &[page.blocks[2].bbox, page.blocks[3].bbox]);
+        assert!(markdown.starts_with("First second中文\n\n"), "{markdown}");
+        assert!(markdown.contains("<table"));
+    }
 }

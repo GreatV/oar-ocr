@@ -1,7 +1,5 @@
-//! Shared MinerU two-step layout parsing helpers for the `mineru` and
-//! `mineru_diffusion` examples. Both run the same `Layout Detection`, followed by
-//! per-region recognition flow and only differ in the model's generate API,
-//! so the layout-output parsing and crop preparation live here.
+//! MinerU 2.5 layout parsing and crop preparation. Diffusion reuses the raw
+//! protocol records, with its own extraction and post-processing rules.
 
 use image::{RgbImage, imageops};
 use once_cell::sync::Lazy;
@@ -28,6 +26,13 @@ pub type ContentBlock = DocumentBlock;
 
 /// Parse the raw layout-detection output into a list of [`ContentBlock`]s.
 pub fn parse_layout_output(output: &str) -> Vec<ContentBlock> {
+    parse_layout_details(output)
+        .into_iter()
+        .map(|(block, _)| block)
+        .collect()
+}
+
+pub(crate) fn parse_layout_records(output: &str) -> Vec<(ContentBlock, bool)> {
     let mut blocks = Vec::new();
     let records: Vec<_> = LAYOUT_REGEX.captures_iter(output).collect();
     for (index, caps) in records.iter().enumerate() {
@@ -53,37 +58,71 @@ pub fn parse_layout_output(output: &str) -> Vec<ContentBlock> {
         let Some((x1, y1, x2, y2)) = normalize_bbox(x1, y1, x2, y2) else {
             continue;
         };
-        if !is_block_type(&ref_type) {
-            continue;
-        }
-
-        if ref_type == "inline_formula" {
-            continue;
-        }
         let angle = parse_angle(tail);
-        blocks.push(ContentBlock {
-            block_type: ref_type,
-            bbox: [x1, y1, x2, y2],
-            angle,
-            content: None,
-        });
+        blocks.push((
+            ContentBlock {
+                block_type: ref_type,
+                bbox: [x1, y1, x2, y2],
+                angle,
+                content: None,
+            },
+            tail.contains("txt_contd_tgt"),
+        ));
+    }
+    blocks
+}
+
+pub(crate) fn parse_layout_details(output: &str) -> Vec<(ContentBlock, bool)> {
+    // MinerUClientHelper._deduplicate_layout_blocks and covered captions
+    // (MinerU-Team/mineru-vl-utils, Apache-2.0); preserve first occurrence.
+    let mut blocks: Vec<(ContentBlock, bool)> = Vec::new();
+    for (mut block, merge_prev) in parse_layout_records(output) {
+        if !is_block_type(&block.block_type) || block.block_type == "inline_formula" {
+            continue;
+        }
+        if block.block_type == "unknown" {
+            block.block_type = "image".into();
+        }
+        if blocks.iter().any(|(previous, _)| {
+            if previous.block_type != block.block_type || previous.angle != block.angle {
+                return false;
+            }
+            let a = previous.bbox.map(f64::from);
+            let b = block.bbox.map(f64::from);
+            let intersection = (a[2].min(b[2]) - a[0].max(b[0])).max(0.)
+                * (a[3].min(b[3]) - a[1].max(b[1])).max(0.);
+            let union =
+                (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - intersection;
+            union > 0. && intersection / union > 0.9
+        }) {
+            continue;
+        }
+        blocks.push((block, merge_prev));
     }
     // Table-internal text/formulas are recognized by the table pass itself.
     let tables: Vec<_> = blocks
         .iter()
-        .filter(|block| block.block_type == "table")
-        .map(|block| block.bbox)
+        .filter(|(block, _)| block.block_type == "table")
+        .map(|(block, _)| block.bbox)
         .collect();
-    blocks.retain(|block| {
+    blocks.retain(|(block, _)| {
         !matches!(
             block.block_type.as_str(),
             "text" | "equation" | "equation_block"
         ) || !tables
             .iter()
-            .any(|table| cover_ratio(*table, block.bbox) > 0.9)
+            .any(|table| cover_ratio(*table, block.bbox) >= 0.9)
     });
-    blocks.dedup_by(|next, prev| {
-        next.block_type == prev.block_type && next.bbox == prev.bbox && next.angle == prev.angle
+    let visuals: Vec<_> = blocks
+        .iter()
+        .filter(|(b, _)| matches!(b.block_type.as_str(), "image" | "chart" | "image_block"))
+        .map(|(b, _)| b.bbox)
+        .collect();
+    blocks.retain(|(block, _)| {
+        block.block_type != "image_caption"
+            || !visuals
+                .iter()
+                .any(|&outer| cover_ratio(outer, block.bbox) >= 0.9)
     });
     blocks
 }
@@ -157,6 +196,13 @@ fn is_block_type(value: &str) -> bool {
             | "table_footnote"
             | "image_footnote"
             | "unknown"
+            | "doc_title"
+            | "paragraph_title"
+            | "formula_number"
+            | "index"
+            | "list_item"
+            | "caption"
+            | "footnote"
     )
 }
 
@@ -179,7 +225,7 @@ pub fn prepare_for_extract(
     for (idx, block) in blocks.iter().enumerate() {
         if matches!(
             block.block_type.as_str(),
-            "image" | "image_block" | "list" | "equation_block"
+            "image" | "chart" | "image_block" | "list" | "equation_block"
         ) {
             continue;
         }
@@ -240,6 +286,21 @@ mod tests {
         assert_eq!(blocks[0].angle, Some(90));
         assert_eq!(blocks[1].angle, Some(270));
         assert_eq!(prompt_for_block(&blocks[1].block_type), "\nImage Analysis:");
+        let records = parse_layout_details(concat!(
+            "<|box_start|>0 0 400 400<|box_end|><|ref_start|>unknown<|ref_end|>",
+            "<|box_start|>10 10 100 100<|box_end|><|ref_start|>image_caption<|ref_end|>",
+            "<|box_start|>500 0 1000 200<|box_end|><|ref_start|>doc_title<|ref_end|>",
+            "<|box_start|>1 1 400 400<|box_end|><|ref_start|>unknown<|ref_end|>",
+            "<|box_start|>500 250 1000 500<|box_end|><|ref_start|>text<|ref_end|>txt_contd_tgt"
+        ));
+        assert_eq!(
+            records
+                .iter()
+                .map(|(b, _)| b.block_type.as_str())
+                .collect::<Vec<_>>(),
+            ["image", "doc_title", "text"]
+        );
+        assert!(records[2].1);
     }
 
     #[test]
