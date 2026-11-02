@@ -2,6 +2,8 @@
 
 The page JSON is the shared, versioned interchange format for one parsed document page. Both pipelines emit it — the classic ONNX pipeline through `StructureResult::to_json` and the vision-language pipeline through `PageDocument::to_json` — so downstream consumers (CLIs, evaluation tools, post-processors) get one shape regardless of which models produced the page. It sits next to the existing `to_markdown` and `to_html` exporters; the classic `StructureResult::to_json_value` is deprecated in its favor (the raw internal result remains available through `serde_json::to_value`).
 
+VL `PageParser::parse_document` returns a `DocumentOutput` containing pages and document Markdown. Export each page with `PageDocument::to_json(width, height)`; see the [VL guide](../oar-ocr-vl/README.md#unified-page-parsing) for joint responses and cross-page content.
+
 ## Schema
 
 ```json
@@ -33,7 +35,7 @@ The page JSON is the shared, versioned interchange format for one parsed documen
 
 - `version` is the schema version; consumers should reject versions they do not know. It is `1`.
 - `pipeline` is `"classic"` for the ONNX structure pipeline, `"vl"` for the vision-language parsers, and `"indra"` for Indra OCR (`IndraPage::to_json`, whose boxes are in the upright page it reports as `page.width` and `page.height`).
-- `page.width` and `page.height` are the pixel dimensions of the image the bounding boxes are expressed in, as passed by the caller. For the classic pipeline that is the input image (orientation correction maps boxes back to it), or the rectified image when document rectification (UVDoc) is enabled, because rectification cannot be inverted. `page.index` is the page's position in a batch when the pipeline knows it, else `null`; `page.angle` is the detected document orientation in degrees when the pipeline corrected one, else `null`.
+- `page.width` and `page.height` are the pixel dimensions of the image the bounding boxes are expressed in, as passed by the caller. For the classic pipeline that is the input image (orientation correction maps boxes back to it), or the rectified image when document rectification (UVDoc) is enabled, because rectification cannot be inverted. For VL parsers, use the canvas returned by `PagePreprocessor` when preprocessing is enabled; MonkeyOCRv2 dewarp keeps the input dimensions. `page.index` is the page's position in a batch when the pipeline knows it, else `null`; `page.angle` is the detected document orientation in degrees when the pipeline corrected one, else `null`.
 - `blocks` lists the page in reading order. Each block has:
   - `type`: the canonical label from the PP-StructureV3 vocabulary (`doc_title`, `paragraph_title`, `text`, `content`, `abstract`, `image`, `table`, `chart`, `formula`, `figure_title`, `table_title`, `chart_title`, `figure_table_chart_title`, `header`, `header_image`, `footer`, `footer_image`, `footnote`, `seal`, `number`, `reference`, `reference_content`, `algorithm`, `formula_number`, `aside_text`, `list`, `region`, `other`). Built-in model labels with a canonical equivalent are mapped (for example MinerU's `page_number` → `number`, `equation_block` → `formula`, `table_caption` → `table_title`); a label the vocabulary does not know is passed through verbatim by both pipelines.
   - `label`: the original model label, present only when it differs from `type` (after the canonical mapping). It is omitted when the two agree.
@@ -43,7 +45,7 @@ The page JSON is the shared, versioned interchange format for one parsed documen
   - `angle`: a per-block rotation in degrees applied before recognition when the pipeline reports one, else `null`.
   - `content`: the recognized content — plain text for text blocks, HTML for tables, LaTeX for formulas — or `null` when the block was not recognized. The classic pipeline takes table content from the paired table result's HTML in plain form (no border attribute or centering wrapper), because table stitching leaves the element text empty, and formula content from the paired formula result, because inline formulas have their element text cleared.
 - `markdown` is the pipeline-rendered Markdown when one was produced, else `null`: the classic pipeline fills it with its `to_markdown` rendering and the VL pipeline with the document's Markdown. Markdown rendering stays pipeline-specific; the two renderers may differ in details (for example title-level inference), and the page JSON does not normalize that.
-- `raw_output` carries the parser's raw transcript only when a VL parser produced neither blocks nor Markdown (for example MonkeyOCRv2 and HPD-Parsing), so such pages are not exported empty; otherwise it is `null`, and it is always `null` for the classic pipeline.
+- `raw_output` carries the parser's raw transcript when a VL parser produced neither blocks nor Markdown; otherwise it is `null`, and it is always `null` for the classic pipeline.
 - `diagnostics` lists non-fatal parse issues (`block_index`, `stage`, `message`); the classic pipeline currently reports none and emits an empty array.
 
 Structured table and formula detail that the classic pipeline recognizes (cells, per-cell text, structure confidences) is not duplicated into blocks; it remains available by serializing the `StructureResult` itself (`serde_json::to_value`). Block content for tables carries the table HTML, and for formulas the LaTeX.

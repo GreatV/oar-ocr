@@ -358,6 +358,10 @@ let ort_config = OrtSessionConfig::new()
     ]);
 ```
 
+## Vision-Language Page and Document Parsing
+
+`PageParser::parse_page` returns a `PageDocument` with normalized blocks, Markdown and diagnostics. `PageParser::parse_document` returns a `DocumentOutput` containing pages in input order, document Markdown and any raw joint response. Most backends parse pages independently and join the available Markdown; Unlimited-OCR-2 reads them in one joint request. See the [VL page and document API guide](../oar-ocr-vl/README.md#unified-page-parsing) for loading, options and joint-generation methods.
+
 ## PaddleOCR-VL
 
 [PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) is a 0.9B document Vision-Language Model from the PaddlePaddle team. It supports 109 languages and task-specific recognition for text, tables, formulas, and charts.
@@ -365,6 +369,8 @@ let ort_config = OrtSessionConfig::new()
 This functionality is available in the separate `oar-ocr-vl` crate, using [Candle](https://github.com/huggingface/candle) for native Rust inference.
 
 PaddleOCR-VL-1.5 and PaddleOCR-VL-1.6 are drop-in replacements via `PaddleOcrVl::from_dir`. Both add **text spotting** and **seal recognition** to the original model's task set.
+
+Chart-region recognition in `DocParser` is opt-in through `PaddleOcrVl::with_chart_recognition(true)`. See the [PaddleOCR-VL guide](../oar-ocr-vl/README.md#paddleocr-vl) for region processing and standalone tasks.
 
 ### Installation
 
@@ -570,7 +576,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Structured boxes refer to the image supplied to the model, including cropped inputs. Invalid or truncated JSON logs a warning and falls back to Markdown without blocks, retaining the raw text and a `structured_json` diagnostic. See the [crate guide](../oar-ocr-vl/README.md#ovisocr3) for coordinate conversion, task mappings, prompt constants, and post-processing options.
+Structured boxes refer to the image supplied to the model, including cropped inputs. Structured mode recovers complete objects from truncated JSON, uses full-page boxes for invalid coordinates, and records diagnostics. See the [crate guide](../oar-ocr-vl/README.md#ovisocr3) for coordinate conversion, task mappings, prompt constants, and post-processing options.
+
+`OvisOcr3::generate_joint_with_prompt` generates one response from several images. `reconstruct_tables` rebuilds tables across two adjacent pages; see the [joint-generation guide](../oar-ocr-vl/README.md#unified-page-parsing) for page-number handling and multi-page reconstruction.
 
 ## MiniCPM-OCR 1.0
 
@@ -599,7 +607,7 @@ From the command line: `oar parse --model openbmb/MiniCPM-OCR-1.0 document.png`.
 
 ## OXR-1.0
 
-[OXR-1.0](https://huggingface.co/SoMarkAI/OXR-1.0) recognizes regions supplied by PP-DocLayout through the explicit model ID `SoMarkAI/OXR-1.0`.
+[OXR-1.0](https://huggingface.co/SoMarkAI/OXR-1.0) recognizes regions supplied by PP-DocLayout through the explicit model ID `SoMarkAI/OXR-1.0`. It predicts their reading order with its grounding prompt before recognition. `Oxr::with_reading_order(false)` selects the layout detector's order.
 
 ```rust,no_run
 use candle_core::Device;
@@ -641,11 +649,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-From the command line: `oar parse --model baidu/Unlimited-OCR-2 document.png`. The page's layout blocks, with boxes, are in `page.blocks`. Multi-page requests, the layout-block output protocol, view modes, and the decoding guards are covered in the [crate guide](../oar-ocr-vl/README.md#unlimited-ocr-2).
+From the command line: `oar parse --model baidu/Unlimited-OCR-2 document.png`. The page's layout blocks, with boxes, are in `page.blocks`. Multi-page `parse_document` uses one joint request and resolves `Auto` views to `Tiled`; explicit `Global` selects global views. Direct `generate` keeps its own `Auto` policy. See the [crate guide](../oar-ocr-vl/README.md#unlimited-ocr-2) for view modes, cross-page Markdown and decoding guards.
 
 ## MonkeyOCRv2-S/B-Parsing
 
 [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) and [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) are 0.6B and 0.7B document parsers. They pair Monkey ViT-S and ViT-B vision encoders, respectively, with the same Qwen3-0.6B decoder. The native Candle implementation reads either checkpoint's dimensions from its configuration and supports the five official tasks: `Layout`, `EndToEnd`, `Text`, `Formula`, and `Table`.
+
+`PageParser` defaults to a native layout pass followed by crop recognition through the shared `DocParser`. `with_two_stage_parsing(false)` selects one-pass page parsing; explicit `generate` calls run the requested task. `from_dir` enables full-page dewarp when both `preprocessor1.pth` and `preprocessor2.pth` are present. `with_dewarp(false)` releases the dewarp networks, and `with_dewarp(true)` loads both files. See the [MonkeyOCRv2 guide](../oar-ocr-vl/README.md#monkeyocrv2-sb-parsing) for the default page API, budgets and standalone rectification.
 
 ### Downloading the Model
 
@@ -660,7 +670,7 @@ hf download zenosai/MonkeyOCRv2-S-Parsing --local-dir MonkeyOCRv2-S-Parsing
 hf download zenosai/MonkeyOCRv2-B-Parsing --local-dir MonkeyOCRv2-B-Parsing
 ```
 
-### Basic Usage
+### Explicit Task Generation
 
 ```rust,no_run
 use oar_ocr_vl::utils::image::load_image;
@@ -695,7 +705,7 @@ cargo run -p oar-ocr-vl --features cuda --example monkeyocrv2 -- \
     document.jpg
 ```
 
-The other `--task` values are `layout`, `text`, `formula`, and `table`. The model also implements `RecognitionBackend` for external-layout crop recognition, although its native tasks are the preferred full-page path.
+The other `--task` values are `layout`, `text`, `formula`, and `table`. `RecognitionBackend` routes external crops to text, formula or table recognition. Use `PageParser` for the default two-stage page pipeline.
 
 The same API and example accept `MonkeyOCRv2-B-Parsing`; select it by changing `--model-dir` to that checkpoint directory.
 
@@ -770,7 +780,11 @@ cargo run -p oar-ocr-vl --features cuda --example hunyuanocr -- \
     document.jpg
 ```
 
-### Application-oriented Prompts
+### Prompts and Joint Requests
+
+`PageParser` selects the loaded version's official document prompt when `HunyuanOcrParseOptions::prompt` is empty. Version 1.5 uses the official Chinese task prompts and an empty system turn; region OCR requests plain text. Explicit `generate` calls use the supplied instructions. See the [HunyuanOCR guide](../oar-ocr-vl/README.md#hunyuanocr-15-direct-inference) for prompts and defaults.
+
+`HunyuanOcr::generate_joint` generates one response from several images with version 1.5. The batch API answers each image separately; see the [joint-generation guide](../oar-ocr-vl/README.md#unified-page-parsing).
 
 Prompts from the upstream HunyuanOCR README:
 
@@ -784,6 +798,8 @@ Prompts from the upstream HunyuanOCR README:
 ## GLM-OCR
 
 [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) is an OCR expert VLM in the `oar-ocr-vl` crate. It uses prompt-driven image-to-text generation and can be used directly or as a `DocParser` backend.
+
+Generation defaults to the SDK's repetition penalty of 1.1 over prompt and generated tokens. `GlmOcr::with_repetition_penalty` sets the penalty; see the [GLM-OCR guide](../oar-ocr-vl/README.md#glm-ocr-direct-inference) for generation and region-processing defaults.
 
 ### Downloading the Model
 
@@ -930,9 +946,13 @@ cargo run -p oar-ocr-vl --features cuda \
 
 ## DocParser
 
-DocParser provides a unified API for external layout-first document parsing with VL-based recognition. PaddleOCR-VL, GLM-OCR, MonkeyOCRv2, OvisOCR2, OvisOCR3, MiniCPM-OCR, OXR, HunyuanOCR, MinerU2.5/Pro, and MinerU-Diffusion implement `RecognitionBackend`. The `doc_parser` CLI example exposes the PaddleOCR-VL and GLM-OCR paths; use the other backends through the library API. HPD-Parsing currently supports only its model-native full-page protocol.
+`DocParser` combines any `LayoutSource` with a `RecognitionBackend` for layout-first document parsing. `PpDocLayout` supplies native Candle layout detection, and `LayoutPageParser` exposes the composition through `PageParser`. Backend reading-order predictions can reorder detected regions before crop recognition; OXR uses this path by default.
 
-Use `parse(&layout, image)` with any `LayoutSource` — `PpDocLayout` is the built-in one and runs on Candle, so no ONNX Runtime is involved. Regions are recognized in layout order and may be grouped into bounded recognition batches. For complete pages, prefer the model-native paths for MonkeyOCRv2, OvisOCR2, OvisOCR3, HPD-Parsing, HunyuanOCR, and the MinerU family. Except for HPD-Parsing, their `RecognitionBackend` implementations are intended for externally detected crops.
+Settings resolve from the backend's `DocParserProfile`, then an explicitly supplied `DocParserConfig`, then `DocParserOptions`. Per-call options override parser options. Custom backends use the default profile; use `with_options` for individual overrides.
+
+Profiles select token budgets, crop merging, label actions, error handling and Markdown styles. `LayoutPostprocessOptions` controls NMS, containment and mask geometry. A `PagePreprocessor` transforms each page once before layout; region boxes refer to that prepared canvas.
+
+Use `parser.render_markdown(&result)` for the selected profile's formatting. See the [crate guide](../oar-ocr-vl/README.md#docparser) for configuration and API examples, and the [runnable DocParser example](../oar-ocr-vl/examples/doc_parser.rs) for CLI usage.
 
 ### Basic Usage
 

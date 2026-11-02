@@ -202,7 +202,7 @@ The [`oar-ocr-vl`](oar-ocr-vl/README.md) crate provides native [Candle](https://
 | [MinerU2.5-Pro-2605](https://huggingface.co/opendatalab/MinerU2.5-Pro-2605-1.2B) | 1.2B | Newer MinerU2.5 checkpoint using the same two-step pipeline |
 | [MiniCPM-OCR 1.0](https://huggingface.co/openbmb/MiniCPM-OCR-1.0) | 1.3B | PP-DocLayout page parsing and text, formula, OTSL table, chart, and seal recognition (SigLIP + Qwen3.5) |
 | [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) | 0.7B | Higher-capacity ViT-B variant with the same parsing and recognition tasks |
-| [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) | 0.6B | Model-native layout, end-to-end parsing, text, formula, and OTSL-table recognition |
+| [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) | 0.6B | Two-stage page parsing, dewarp, layout, text, formula, and OTSL-table recognition |
 | [OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) | 0.8B | Model-native full-page document-to-Markdown parsing |
 | [OvisOCR3](https://huggingface.co/ATH-MaaS/OvisOCR3) | 0.8B | Model-native Markdown or structured page parsing, text, formula, HTML table, and chart recognition |
 | [OXR-1.0](https://huggingface.co/SoMarkAI/OXR-1.0) | 1.4B | PP-DocLayout page parsing and text, formula, HTML table, code, and chemical-structure recognition |
@@ -217,9 +217,13 @@ The [`oar-ocr-vl`](oar-ocr-vl/README.md) crate provides native [Candle](https://
 
 PaddleOCR-VL variants, GLM-OCR, TeleOCR, MiniCPM-OCR, OXR, jina-ocr-v1, and WeVisDoc integrate with the external-layout [`DocParser`](oar-ocr-vl/README.md#document-parsing-pipeline). OvisOCR2, OvisOCR3, WeVisDoc, Xiaomi-OCR-0, HPD-Parsing, Youtu-Parsing-Omni, and the MonkeyOCRv2 S/B parsing models also provide model-native full-page paths. Unlimited-OCR-2 parses whole pages, alone or several per request, through its model-native path only. HunyuanOCR and the MinerU models also use their model-native parsing pipelines.
 
+`PageParser::parse_document` returns a `DocumentOutput` with pages and document Markdown. Unlimited-OCR-2 uses one joint request with tiled views by default; HunyuanOCR 1.5 and OvisOCR3 offer explicit joint-generation methods. See the [page and document API guide](oar-ocr-vl/README.md#unified-page-parsing).
+
 MiniCPM-OCR uses the explicit repository ID `openbmb/MiniCPM-OCR-1.0` through `AnyPageParser` and, like its official SDK, reads the regions PP-DocLayoutV3 detects; see the [MiniCPM-OCR guide](oar-ocr-vl/README.md#minicpm-ocr-10).
 
-OXR uses the explicit repository ID `SoMarkAI/OXR-1.0` through `AnyPageParser`. PP-DocLayout supplies its regions and reading order; the official separate D-FINE layout model is not used. See the [OXR guide](oar-ocr-vl/README.md#oxr-10) for weight-license terms, region tasks, and pixel controls.
+OXR uses the explicit repository ID `SoMarkAI/OXR-1.0` through `AnyPageParser`. PP-DocLayout supplies regions, and OXR predicts their reading order with its grounding prompt by default. `Oxr::with_reading_order(false)` selects detector order. See the [OXR guide](oar-ocr-vl/README.md#oxr-10) for details and weight-license terms.
+
+Chart-region recognition is opt-in through `PaddleOcrVl::with_chart_recognition(true)`. GLM-OCR defaults to repetition penalty 1.1, and HunyuanOCR page parsing selects the loaded version's official prompt. See the [VL usage guide](oar-ocr-vl/README.md#usage) for model defaults and controls.
 
 See the [`oar-ocr-vl` guide](oar-ocr-vl/README.md) for setup and [`oar-ocr-vl/examples`](oar-ocr-vl/examples) for runnable examples.
 
