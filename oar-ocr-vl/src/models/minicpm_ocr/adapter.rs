@@ -38,6 +38,10 @@ fn format_region(label: &str, task: RecognitionTask, raw: &str) -> String {
             ..Default::default()
         },
     );
+    if mixed {
+        content = text::normalize_crop_text(&content, false);
+        return text::split_protected_paragraphs(&content, true);
+    }
     let display = matches!(label, "display_formula" | "formula")
         || task == RecognitionTask::Formula && label != "inline_formula";
     if display || label == "inline_formula" {
@@ -82,9 +86,6 @@ fn format_region(label: &str, task: RecognitionTask, raw: &str) -> String {
         }
         if display {
             return format!("$$\n{content}\n$$");
-        }
-        if mixed {
-            return text::split_protected_paragraphs(&content, true);
         }
         return format!("${content}$");
     }
@@ -320,6 +321,10 @@ mod tests {
 
     #[test]
     fn otsl_tables_and_charts_lose_their_envelope() {
+        assert_eq!(
+            format_region("inline_formula", RecognitionTask::Ocr, "$x$ and $y$"),
+            "$x$ and $y$"
+        );
         let table = "<otsl><fcel>Year<fcel>Share<nl><fcel>2017<lcel><nl></otsl>";
         let html = convert_otsl_to_html(strip_otsl_envelope(table));
         assert!(
