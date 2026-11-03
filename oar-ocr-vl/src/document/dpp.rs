@@ -1215,7 +1215,7 @@ fn embed_captions(regions: &mut [Region], page: usize, report: &mut DppReport) -
         let caption = if md.starts_with("<caption>") && md.ends_with("</caption>") {
             md.clone()
         } else {
-            format!("<caption>{}</caption>", inline_markup(md))
+            format!("<caption>{}</caption>", inline_markup(md, true))
         };
         regions[index].item.md = caption;
         let fragment = anchored(&regions[index].item, page);
@@ -1241,13 +1241,14 @@ fn cell_markup(html: &str) -> String {
     static CELL: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(<t[dh]>)(.*?)(</t[dh]>)").unwrap());
     CELL.replace_all(html, |cell: &regex::Captures<'_>| {
-        format!("{}{}{}", &cell[1], inline_markup(&cell[2]), &cell[3])
+        format!("{}{}{}", &cell[1], inline_markup(&cell[2], false), &cell[3])
     })
     .into_owned()
 }
 
-/// Converts Markdown emphasis, code spans and links to HTML, leaving math untouched.
-fn inline_markup(text: &str) -> String {
+/// Converts Markdown emphasis, code spans and links to HTML, leaving math untouched. Pipe-table
+/// cells arrive escaped; raw text needs `escape_code` so code such as `Vec<T>` stays literal.
+fn inline_markup(text: &str, escape_code: bool) -> String {
     static MARKUP: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(concat!(
             r"(?P<math>\$\$.*?\$\$|\$[^$]+\$|\\\(.*?\\\))|",
@@ -1261,7 +1262,12 @@ fn inline_markup(text: &str) -> String {
     MARKUP
         .replace_all(text, |caps: &regex::Captures<'_>| {
             if let Some(code) = caps.name("code") {
-                format!("<code>{}</code>", code.as_str())
+                let code = code.as_str();
+                if escape_code {
+                    format!("<code>{}</code>", html_escape::encode_text(code))
+                } else {
+                    format!("<code>{code}</code>")
+                }
             } else if let Some(text) = caps.name("strong") {
                 format!("<strong>{}</strong>", text.as_str())
             } else if let Some(text) = caps.name("em") {
@@ -1395,7 +1401,7 @@ mod tests {
                     "table",
                     r#"<table><tr><td title="cell"><eq>$x$</eq></td></tr></table>"#,
                 ),
-                block("figure_title", "*Results*"),
+                block("figure_title", "*Results* `Vec<T>`"),
                 block("footer", "End"),
                 block("formula", r"\[x=y\tag{1}\]"),
                 block("formula", r"$$\frac{x}{y} \tag*{(2)}$$"),
@@ -1447,7 +1453,7 @@ mod tests {
         assert_eq!(
             output
                 .markdown
-                .matches("<caption><em>Results</em></caption>")
+                .matches("<caption><em>Results</em> <code>Vec&lt;T&gt;</code></caption>")
                 .count(),
             1
         );
