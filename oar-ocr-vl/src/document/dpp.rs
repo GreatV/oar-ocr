@@ -854,54 +854,64 @@ fn format_content(
         clean_tokens: false,
         ..Default::default()
     };
-    let text = if matches!(class, Form | KeyValueRegion | DocumentIndex) {
-        text
-    } else {
-        let options = DelimiterOptions {
-            matching: BracketMatching::Spans,
-            inline: ("$$", "$$"),
-            display: ("$$", "$$"),
-            ..Default::default()
-        };
-        let mut unpaired = false;
-        let mut unmatched = false;
-        let text = map_code_spans(&text, |prose| {
-            let text = map_html_equations(
-                prose,
-                |part| {
-                    let (part, retained) = inline_dollars(part);
-                    unpaired |= retained;
-                    normalize_math_delimiters(&part, &options)
-                },
-                |body| format_formula_with_options(body, &formula_options),
-            );
-            unmatched |= [r"\(", r"\)", r"\[", r"\]"]
-                .iter()
-                .any(|s| text.contains(s))
-                || !text.matches("$$").count().is_multiple_of(2);
-            text
-        });
-        if unpaired {
-            report.add(
-                page,
-                Some(index),
-                "text-inline-equations",
-                "Unpaired single-dollar delimiter",
-            );
-        }
-        if unmatched {
-            report.add(
-                page,
-                Some(index),
-                "text-inline-equations",
-                "Unmatched math delimiter",
-            );
-            if class == Formula {
-                return text;
-            }
-        }
+    let options = DelimiterOptions {
+        matching: BracketMatching::Spans,
+        inline: ("$$", "$$"),
+        display: ("$$", "$$"),
+        ..Default::default()
+    };
+    let mut unpaired = false;
+    let mut unmatched = false;
+    let mut normalize = |prose: &str| {
+        let text = map_html_equations(
+            prose,
+            |part| {
+                let (part, retained) = inline_dollars(part);
+                unpaired |= retained;
+                normalize_math_delimiters(&part, &options)
+            },
+            |body| format_formula_with_options(body, &formula_options),
+        );
+        unmatched |= [r"\(", r"\)", r"\[", r"\]"]
+            .iter()
+            .any(|s| text.contains(s))
+            || !text.matches("$$").count().is_multiple_of(2);
         text
     };
+    let text = map_code_spans(&text, |prose| {
+        if matches!(class, Form | KeyValueRegion | DocumentIndex) {
+            static FIELD_ID: LazyLock<Regex> =
+                LazyLock::new(|| Regex::new(r"^\s*(?:[-*+]|\d+\.)\s+\\\[[^\r\n]*?\\\]").unwrap());
+            prose
+                .split_inclusive('\n')
+                .map(|line| {
+                    let end = FIELD_ID.find(line).map_or(0, |field| field.end());
+                    format!("{}{}", &line[..end], normalize(&line[end..]))
+                })
+                .collect()
+        } else {
+            normalize(prose)
+        }
+    });
+    if unpaired {
+        report.add(
+            page,
+            Some(index),
+            "text-inline-equations",
+            "Unpaired single-dollar delimiter",
+        );
+    }
+    if unmatched {
+        report.add(
+            page,
+            Some(index),
+            "text-inline-equations",
+            "Unmatched math delimiter",
+        );
+        if class == Formula {
+            return text;
+        }
+    }
     match class {
         Formula => {
             let body = strip_math_wrappers(&text);
@@ -1041,8 +1051,10 @@ fn format_table(
                 ..Default::default()
             },
         )
+    } else if let Some(html) = markdown_table_to_html(text) {
+        cell_markup(&html)
     } else {
-        markdown_table_to_html(text).unwrap_or_else(|| text.into())
+        text.into()
     };
     if let Some((start, closing)) = table_bounds(&html) {
         if html[start..closing].to_ascii_lowercase().contains("<table") {
@@ -1226,6 +1238,40 @@ fn embed_captions(regions: &mut [Region], page: usize, report: &mut DppReport) -
     embedded
 }
 
+/// Pipe-table cells keep their Markdown emphasis, code and links as text, but DPP writes them as
+/// HTML inside table cells (`tables-bold-and-italic-inside-tables`). Math is left for the math pass.
+fn cell_markup(html: &str) -> String {
+    static CELL: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(<t[dh]>)(.*?)(</t[dh]>)").unwrap());
+    static MARKUP: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(concat!(
+            r"(?P<math>\$\$.*?\$\$|\$[^$]+\$|\\\(.*?\\\))|",
+            r"\[(?P<text>[^\]]*)\]\((?P<href>[^)\s]*)\)|",
+            r"`(?P<code>[^`]+)`|",
+            r"\*\*(?P<strong>[^*\s](?:[^*]*[^*\s])?)\*\*|",
+            r"\*(?P<em>[^*\s](?:[^*]*[^*\s])?)\*",
+        ))
+        .unwrap()
+    });
+    CELL.replace_all(html, |cell: &regex::Captures<'_>| {
+        let body = MARKUP.replace_all(&cell[2], |caps: &regex::Captures<'_>| {
+            if let Some(code) = caps.name("code") {
+                format!("<code>{}</code>", code.as_str())
+            } else if let Some(text) = caps.name("strong") {
+                format!("<strong>{}</strong>", text.as_str())
+            } else if let Some(text) = caps.name("em") {
+                format!("<em>{}</em>", text.as_str())
+            } else if let Some(href) = caps.name("href") {
+                format!(r#"<a href="{}">{}</a>"#, href.as_str(), &caps["text"])
+            } else {
+                caps[0].to_string()
+            }
+        });
+        format!("{}{body}{}", &cell[1], &cell[3])
+    })
+    .into_owned()
+}
+
 fn map_code_spans(text: &str, mut prose: impl FnMut(&str) -> String) -> String {
     static TICKS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`+").unwrap());
     let runs: Vec<_> = TICKS.find_iter(text).collect();
@@ -1336,7 +1382,7 @@ mod tests {
                 block("formula", r"\[x=y\tag{1}\]"),
                 block("formula", r"$$\frac{x}{y} \tag*{(2)}$$"),
                 block("text", "Display \\[\nx^2\n\\] and inline \\(x^2\\)"),
-                block("form", r"- \[1a\] **Label:** value"),
+                block("form", r"- \[1a\] **Label:** $w h$"),
                 block("seal", "Authority\nAPPROVED"),
                 block("stamp", "PAID\n2026"),
                 block(
@@ -1368,7 +1414,7 @@ mod tests {
             "$$x=y$$ (1)",
             r"$$\frac{x}{y}$$ (2)",
             "Display $$x^2$$ and inline $$x^2$$",
-            r"- \[1a\] **Label:** value",
+            r"- \[1a\] **Label:** $$w h$$",
             "[seal: Authority APPROVED]",
             "[stamp: PAID 2026]",
             "* first\n  continuation\n* second\n* third\n* fourth\n2. fifth",
@@ -1571,6 +1617,14 @@ mod tests {
                 },
                 block("chart", ""),
                 block("text", ""),
+                block(
+                    "table",
+                    "| Source | Value |\n| --- | --- |\n| [Report](https://example.com) **1** *2* `x` | 1 |",
+                ),
+                block(
+                    "table",
+                    "| Formula | Value |\n| --- | --- |\n| $$a*b*c$$ | $$w h$$ |",
+                ),
             ],
             ..PageDocument::default()
         };
@@ -1581,7 +1635,7 @@ mod tests {
         assert!(
             output
                 .markdown
-                .contains("<table data-source=\"chart\"><tr><th>Year</th><th>`A`</th>")
+                .contains("<table data-source=\"chart\"><tr><th>Year</th><th><code>A</code></th>")
         );
         assert!(output.markdown.contains(r"Unclosed \[x"));
         assert!(output.sidecar.items.iter().all(|item| item.b_box.is_none()));
@@ -1605,6 +1659,12 @@ mod tests {
                 .any(|f| f.block_index == Some(8) && f.rule_id == "output-the-sidecar")
         );
         assert!(!output.markdown.contains("image_7.png"));
+        for cell in [
+            r#"<td><a href="https://example.com">Report</a> <strong>1</strong> <em>2</em> <code>x</code></td>"#,
+            "<td>$$a*b*c$$</td>",
+        ] {
+            assert!(output.markdown.contains(cell), "{cell}");
+        }
 
         for rule in [
             "output-the-sidecar",
