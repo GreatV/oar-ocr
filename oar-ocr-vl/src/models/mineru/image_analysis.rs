@@ -69,26 +69,18 @@ fn field<'a>(raw: &'a str, name: &str) -> &'a str {
 }
 
 pub(super) fn wrap_table_formulas(content: &str) -> String {
-    use crate::render::text::{BracketMatching, DelimiterOptions, normalize_math_delimiters};
-    use regex::Regex;
-    use std::sync::LazyLock;
-    static EQ: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<eq>.*?</eq>").unwrap());
+    use crate::render::text::{
+        BracketMatching, DelimiterOptions, map_html_equations, normalize_math_delimiters,
+    };
     let options = DelimiterOptions {
         matching: BracketMatching::NonemptySpans,
         inline: ("<eq>", "</eq>"),
         display: ("<eq>", "</eq>"),
         ..Default::default()
     };
-    let mut output = String::new();
-    let mut start = 0;
-    for protected in EQ.find_iter(content) {
-        output.push_str(&normalize_math_delimiters(
-            &content[start..protected.start()],
-            &options,
-        ));
-        output.push_str(protected.as_str());
-        start = protected.end();
-    }
-    output.push_str(&normalize_math_delimiters(&content[start..], &options));
-    output
+    map_html_equations(
+        content,
+        |text| normalize_math_delimiters(text, &options),
+        |text| format!("<eq>{text}</eq>"),
+    )
 }

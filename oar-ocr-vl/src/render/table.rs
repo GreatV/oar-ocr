@@ -11,6 +11,12 @@ pub(crate) use otsl::{
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+pub(crate) const TABLE_FIGURE_LABEL: &str = "__table_figure";
+
+pub(crate) fn table_figure_image(index: usize) -> String {
+    format!("<img src=\"image_{}.png\" alt=\"Image\" />", index + 1)
+}
+
 // Shared regex patterns
 pub static TABLE_TAG_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"</?(table|tr|th|td|thead|tbody|tfoot)[^>]*>").expect("static regex"));

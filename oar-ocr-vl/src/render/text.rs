@@ -10,8 +10,8 @@ mod formula;
 mod repetition;
 pub(crate) use formula::{
     BracketMatching, DelimiterOptions, FormulaOptions, FormulaRepair, MathStripping,
-    ensure_math_wrappers, format_formula_with_options, has_bracket_math, normalize_math_delimiters,
-    repair_math_in_text,
+    ensure_math_wrappers, format_formula_with_options, has_bracket_math, map_html_equations,
+    normalize_math_delimiters, repair_math_in_text,
 };
 pub(crate) use repetition::{
     RepeatAlgorithm, RepetitionOptions, clean_repetition, has_repeated_lines,

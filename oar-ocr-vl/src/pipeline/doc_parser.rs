@@ -241,10 +241,10 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
         let mut projected = std::borrow::Cow::Borrowed(result.layout_elements.as_slice());
         if self.profile.table_figure_tokens {
             let figures = super::table_figures::TableFigures::new(&projected);
-            ignored.push("__table_figure".into());
+            ignored.push(crate::render::table::TABLE_FIGURE_LABEL.into());
             for (index, element) in projected.to_mut().iter_mut().enumerate() {
                 if figures.absorbed(index) {
-                    element.label = Some("__table_figure".into());
+                    element.label = Some(crate::render::table::TABLE_FIGURE_LABEL.into());
                 }
             }
         }

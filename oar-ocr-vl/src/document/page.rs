@@ -71,7 +71,7 @@ impl DocumentOutput {
 
 /// Maps built-in VL labels that `LayoutElementType::from_label` does not know
 /// (MinerU's native block types) onto the canonical page JSON vocabulary.
-fn canonical_alias(label: &str) -> &str {
+pub(crate) fn canonical_alias(label: &str) -> &str {
     match label {
         "page_number" => "number",
         "page_footnote" | "table_footnote" | "image_footnote" => "footnote",
