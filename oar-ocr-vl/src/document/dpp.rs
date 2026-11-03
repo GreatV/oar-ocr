@@ -699,7 +699,14 @@ fn anchored(item: &DppItem, page: usize) -> String {
 }
 
 fn separator_findings(md: &str, page: usize, index: Option<usize>, report: &mut DppReport) {
-    if md.lines().any(|line| line.trim() == "---") {
+    let mut fenced = false;
+    if md.lines().any(|line| {
+        let line = line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            fenced = !fenced;
+        }
+        !fenced && line == "---"
+    }) {
         report.add(
             page,
             index,
@@ -898,7 +905,7 @@ fn format_content(
     match class {
         Formula => {
             let body = strip_math_wrappers(&text);
-            if body.contains('$') {
+            if body.replace(r"\$", "").contains('$') {
                 return text;
             }
             static TAG: LazyLock<Regex> =
@@ -1340,6 +1347,8 @@ mod tests {
                 block("section-header", "# Part-\nHeading"),
                 block("formula", "$x$"),
                 block("text", "Unpaired $value"),
+                block("code", "a: 1\n---\nb: 2"),
+                block("formula", r"P = \$5"),
             ],
             markdown: Some("Cached profile Markdown".into()),
             ..PageDocument::default()
@@ -1365,6 +1374,8 @@ mod tests {
             "* first\n  continuation\n* second\n* third\n* fourth\n2. fifth",
             "## Part- Heading",
             "<tr><td></td><td>c</td></tr>",
+            "```\na: 1\n---\nb: 2\n```",
+            r"$$P = \$5$$",
         ] {
             assert!(output.markdown.contains(fragment), "{fragment}");
         }
