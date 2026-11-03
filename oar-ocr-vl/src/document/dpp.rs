@@ -632,7 +632,18 @@ fn lower_page(
     let mut chunks = Vec::new();
     let mut tables = Vec::new();
     for region in regions {
-        if !embedded[region.index] && !region.item.md.trim().is_empty() {
+        if region.item.md.trim().is_empty() {
+            report.add(
+                page,
+                Some(region.index),
+                if region.item.item_type == DppClass::Picture {
+                    "images-images-and-figures"
+                } else {
+                    "output-the-sidecar"
+                },
+                "Region has no recognized content; Markdown element is missing",
+            );
+        } else if !embedded[region.index] {
             separator_findings(&region.item.md, page, Some(region.index), report);
             chunks.push(anchored(&region.item, page));
         }
@@ -846,15 +857,23 @@ fn format_content(
             ..Default::default()
         };
         let mut unpaired = false;
-        let text = map_html_equations(
-            &text,
-            |part| {
-                let (part, retained) = inline_dollars(part);
-                unpaired |= retained;
-                normalize_math_delimiters(&part, &options)
-            },
-            |body| format_formula_with_options(body, &formula_options),
-        );
+        let mut unmatched = false;
+        let text = map_code_spans(&text, |prose| {
+            let text = map_html_equations(
+                prose,
+                |part| {
+                    let (part, retained) = inline_dollars(part);
+                    unpaired |= retained;
+                    normalize_math_delimiters(&part, &options)
+                },
+                |body| format_formula_with_options(body, &formula_options),
+            );
+            unmatched |= [r"\(", r"\)", r"\[", r"\]"]
+                .iter()
+                .any(|s| text.contains(s))
+                || !text.matches("$$").count().is_multiple_of(2);
+            text
+        });
         if unpaired {
             report.add(
                 page,
@@ -863,11 +882,7 @@ fn format_content(
                 "Unpaired single-dollar delimiter",
             );
         }
-        if [r"\(", r"\)", r"\[", r"\]"]
-            .iter()
-            .any(|s| text.contains(s))
-            || !text.matches("$$").count().is_multiple_of(2)
-        {
+        if unmatched {
             report.add(
                 page,
                 Some(index),
@@ -913,28 +928,33 @@ fn format_content(
             format!("{} {title}", "#".repeat(usize::from(level)))
         }
         PageHeader | PageFooter => text.lines().map(unheading).collect::<Vec<_>>().join("\n"),
-        ListItem => text
-            .lines()
-            .map(|line| {
-                let body = line.trim_start();
-                let indentation = &line[..line.len() - body.len()];
-                if body.is_empty()
-                    || body.starts_with("* ")
-                    || body.split_once(". ").is_some_and(|(n, _)| {
-                        !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
-                    })
-                {
-                    line.to_string()
-                } else {
-                    let body = body
-                        .strip_prefix("- ")
-                        .or_else(|| body.strip_prefix("+ "))
-                        .unwrap_or(body);
-                    format!("{indentation}* {body}")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
+        ListItem => {
+            let mut first = true;
+            text.lines()
+                .map(|line| {
+                    let body = line.trim_start();
+                    let indentation = &line[..line.len() - body.len()];
+                    if body.is_empty() {
+                        return line.to_string();
+                    }
+                    let initial = std::mem::replace(&mut first, false);
+                    if let Some(body) = body.strip_prefix("- ").or_else(|| body.strip_prefix("+ "))
+                    {
+                        format!("{indentation}* {body}")
+                    } else if !initial
+                        || body.starts_with("* ")
+                        || body.split_once(". ").is_some_and(|(n, _)| {
+                            !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+                        })
+                    {
+                        line.to_string()
+                    } else {
+                        format!("{indentation}* {body}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
         CheckboxSelected | CheckboxUnselected => {
             let marker = if class == CheckboxSelected {
                 "[x]"
@@ -1199,36 +1219,72 @@ fn embed_captions(regions: &mut [Region], page: usize, report: &mut DppReport) -
     embedded
 }
 
-fn inline_dollars(text: &str) -> (String, bool) {
-    static SPANS: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?s)\$\$.*?\$\$|\$([^$\n]+)\$|\$").unwrap());
+fn map_code_spans(text: &str, mut prose: impl FnMut(&str) -> String) -> String {
+    static TICKS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`+").unwrap());
+    let runs: Vec<_> = TICKS.find_iter(text).collect();
     let mut output = String::new();
-    let mut cursor = 0;
-    let mut unpaired = false;
-    while let Some(caps) = SPANS.captures_at(text, cursor) {
-        let span = caps.get(0).unwrap();
-        output.push_str(&text[cursor..span.start()]);
-        if let Some(body) = caps.get(1).map(|m| m.as_str()) {
-            if body.starts_with(|ch: char| ch.is_ascii_digit()) {
-                cursor = if span.end() == text.len() {
-                    span.end()
-                } else {
-                    span.end() - 1
-                };
-                output.push_str(&text[span.start()..cursor]);
-                continue;
-            }
-            output.push_str(&format!("$${}$$", body.trim()));
+    let (mut cursor, mut i) = (0, 0);
+    while i < runs.len() {
+        let open = runs[i];
+        if let Some(offset) = runs[i + 1..]
+            .iter()
+            .position(|close| close.len() == open.len())
+        {
+            let close = runs[i + 1 + offset];
+            output.push_str(&prose(&text[cursor..open.start()]));
+            output.push_str(&text[open.start()..close.end()]);
+            cursor = close.end();
+            i += offset + 2;
         } else {
-            if span.as_str() == "$" {
-                let next = text.as_bytes().get(span.end());
-                unpaired |= !next.is_some_and(u8::is_ascii_digit)
-                    && next != Some(&b'$')
-                    && !text[..span.start()].ends_with('$');
-            }
-            output.push_str(span.as_str());
+            i += 1;
         }
-        cursor = span.end();
+    }
+    output.push_str(&prose(&text[cursor..]));
+    output
+}
+
+fn inline_dollars(text: &str) -> (String, bool) {
+    static TOKENS: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\\.|(?s:\$\$.*?\$\$)|\$\$|\$").unwrap());
+    let tokens: Vec<_> = TOKENS.find_iter(text).collect();
+    let mut output = String::new();
+    let (mut cursor, mut i) = (0, 0);
+    let mut unpaired = false;
+    while i < tokens.len() {
+        let open = tokens[i];
+        output.push_str(&text[cursor..open.start()]);
+        if open.as_str() == "$"
+            && let Some(next) = text[open.end()..]
+                .chars()
+                .next()
+                .filter(|ch| !ch.is_whitespace())
+        {
+            let close = tokens[i + 1..]
+                .iter()
+                .position(|token| token.as_str().starts_with('$'));
+            if let Some(offset) = close {
+                let close = tokens[i + 1 + offset];
+                let body = &text[open.end()..close.start()];
+                // Pandoc tex_math_dollars: tight inner boundaries and no digit after the closer.
+                if close.as_str() == "$"
+                    && !body.contains(['\n', '\r'])
+                    && !body.ends_with(char::is_whitespace)
+                    && !text
+                        .as_bytes()
+                        .get(close.end())
+                        .is_some_and(u8::is_ascii_digit)
+                {
+                    output.push_str(&format!("$${body}$$"));
+                    cursor = close.end();
+                    i += offset + 2;
+                    continue;
+                }
+            }
+            unpaired |= !next.is_ascii_digit();
+        }
+        output.push_str(open.as_str());
+        cursor = open.end();
+        i += 1;
     }
     output.push_str(&text[cursor..]);
     (output, unpaired)
@@ -1260,7 +1316,7 @@ mod tests {
             blocks: vec![
                 block(
                     "text",
-                    r"Cost $25; \(x\); inline $\alpha_i^{2}$ and $x^2$; display $$q$$; range $5 to $10; simple $x$; $ F = kx $, $ k $, $ N/m $",
+                    r"Cost $25; \(x\); inline $\alpha_i^{2}$ and $x^2$; display $$q$$; range $5 to $10; simple $x$; $F = kx$, $k$, $N/m$; Let $2x$ and $y$ be positive; $5 and $10; `echo $HOME $PATH`; ``\(literal\) \[open $$ $missing ` tick``",
                 ),
                 block("code", r"    return x  # \(literal\)"),
                 block("header", "# Report"),
@@ -1276,7 +1332,10 @@ mod tests {
                 block("form", r"- \[1a\] **Label:** value"),
                 block("seal", "Authority\nAPPROVED"),
                 block("stamp", "PAID\n2026"),
-                block("List-item", "first\n- second\n* third\n2. fourth"),
+                block(
+                    "List-item",
+                    "first\n  continuation\n- second\n+ third\n* fourth\n2. fifth",
+                ),
                 block("table", "<OTSL><FCEL>a<FCEL>b<NL><FCEL><FCEL>c<NL></OTSL>"),
                 block("section-header", "# Part-\nHeading"),
                 block("formula", "$x$"),
@@ -1294,7 +1353,7 @@ mod tests {
             DppClass::PageFooter
         );
         for fragment in [
-            r"Cost $25; $$x$$; inline $$\alpha_i^{2}$$ and $$x^2$$; display $$q$$; range $5 to $10; simple $$x$$; $$F = kx$$, $$k$$, $$N/m$$",
+            r"Cost $25; $$x$$; inline $$\alpha_i^{2}$$ and $$x^2$$; display $$q$$; range $5 to $10; simple $$x$$; $$F = kx$$, $$k$$, $$N/m$$; Let $$2x$$ and $$y$$ be positive; $5 and $10; `echo $HOME $PATH`; ``\(literal\) \[open $$ $missing ` tick``",
             r#"<td title="cell">$$x$$</td>"#,
             "```\n    return x  # \\(literal\\)\n```",
             "$$x=y$$ (1)",
@@ -1303,7 +1362,7 @@ mod tests {
             r"- \[1a\] **Label:** value",
             "[seal: Authority APPROVED]",
             "[stamp: PAID 2026]",
-            "* first\n* second\n* third\n2. fourth",
+            "* first\n  continuation\n* second\n* third\n* fourth\n2. fifth",
             "## Part- Heading",
             "<tr><td></td><td>c</td></tr>",
         ] {
@@ -1495,6 +1554,12 @@ mod tests {
                 block("form", "Unstructured fields"),
                 block("text", "Printed\n---\nseparator"),
                 block("table", "<table><tr><td><table></table></td></tr></table>"),
+                DocumentBlock {
+                    content: None,
+                    ..block("image", "")
+                },
+                block("chart", ""),
+                block("text", ""),
             ],
             ..PageDocument::default()
         };
@@ -1510,6 +1575,26 @@ mod tests {
         assert!(output.markdown.contains(r"Unclosed \[x"));
         assert!(output.sidecar.items.iter().all(|item| item.b_box.is_none()));
         assert_eq!(output.report.emitted_granularity, DppGranularity::None);
+        for index in [6, 7] {
+            assert!(
+                output
+                    .report
+                    .findings
+                    .iter()
+                    .any(|f| f.block_index == Some(index)
+                        && f.rule_id == "images-images-and-figures")
+            );
+            assert_eq!(output.sidecar.items[index].item_type, DppClass::Picture);
+        }
+        assert!(
+            output
+                .report
+                .findings
+                .iter()
+                .any(|f| f.block_index == Some(8) && f.rule_id == "output-the-sidecar")
+        );
+        assert!(!output.markdown.contains("image_7.png"));
+
         for rule in [
             "output-the-sidecar",
             "output-boxes-and-granularity",
