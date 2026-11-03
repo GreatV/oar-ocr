@@ -5,6 +5,8 @@
 
 use super::page::{DocumentBlock, DocumentOutput, PageDocument, canonical_alias};
 use super::structure::LayoutElementType;
+use crate::api::recognition::FormulaNumberComposition;
+use crate::render::markdown::assembly::formula_number_pair;
 use crate::render::table::{
     HtmlInput, NoTokens, OtslOptions, RowPadding, TABLE_FIGURE_LABEL, TableWrapper,
     convert_otsl_to_html_with_options, markdown_table_to_html, table_figure_image, table_span,
@@ -624,6 +626,7 @@ fn lower_page(
     }
     let mut embedded = embed_captions(&mut regions, page, report);
     embed_figures(&mut regions, source, page, &mut embedded, report);
+    embed_formula_numbers(&mut regions, source, &output, &mut embedded, report);
     regions.sort_by_key(|region| match region.item.item_type {
         DppClass::PageHeader => 0,
         DppClass::PageFooter => 2,
@@ -822,7 +825,8 @@ fn format_content(
         .strip_prefix("cross_")
         .or_else(|| label.strip_prefix("append_"))
         .unwrap_or(label);
-    let chart = base_label == "chart";
+    let diagram = text.starts_with("```mermaid\n") || text.starts_with("```diagram/");
+    let chart = base_label == "chart" && !diagram;
     if class == Picture && matches!(base_label, "seal" | "stamp") {
         let text = text
             .lines()
@@ -875,7 +879,7 @@ fn format_content(
             || !text.matches("$$").count().is_multiple_of(2);
         text
     };
-    let text = map_code_spans(&text, |prose| {
+    let text = map_math_prose(&text, |prose| {
         if matches!(class, Form | KeyValueRegion | DocumentIndex) {
             static FIELD_ID: LazyLock<Regex> =
                 LazyLock::new(|| Regex::new(r"^\s*(?:[-*+]|\d+\.)\s+\\\[[^\r\n]*?\\\]").unwrap());
@@ -1160,6 +1164,75 @@ fn embed_figures(
     }
 }
 
+fn embed_formula_numbers(
+    regions: &mut [Region],
+    source: &PageDocument,
+    page: &DppPage,
+    embedded: &mut [bool],
+    report: &mut DppReport,
+) {
+    let pairing_label = |region: &Region| {
+        if region.item.item_type == DppClass::Formula {
+            "formula"
+        } else if region.label == "formula_number" {
+            "formula_number"
+        } else {
+            ""
+        }
+    };
+    let mut i = 0;
+    while i + 1 < regions.len() {
+        let pair = formula_number_pair(
+            pairing_label(&regions[i]),
+            pairing_label(&regions[i + 1]),
+            FormulaNumberComposition::AdjacentTag,
+        );
+        let Some((formula, number)) = pair else {
+            i += 1;
+            continue;
+        };
+        let (formula, number) = (i + formula, i + number);
+        if !regions[formula].item.md.is_empty() && !regions[number].item.md.is_empty() {
+            regions[number].item.item_type = DppClass::Formula;
+            regions[number].item.md = strip_math_wrappers(&regions[number].item.md).trim().into();
+            let fragment = anchored(&regions[number].item, page.page);
+            regions[formula].item.md.push_str(&format!(" {fragment}"));
+            let a = source.blocks[formula].bbox;
+            let b = source.blocks[number].bbox;
+            if regions[formula].item.b_box.is_some() && regions[number].item.b_box.is_some() {
+                regions[formula].item.b_box = region_box(
+                    [
+                        a[0].min(b[0]),
+                        a[1].min(b[1]),
+                        a[2].max(b[2]),
+                        a[3].max(b[3]),
+                    ],
+                    page.width,
+                    page.height,
+                );
+            }
+            embedded[number] = true;
+            report.add(
+                page.page,
+                Some(number),
+                "output-the-sidecar",
+                format!("Equation number is also part of block {formula}'s formula md"),
+            );
+        }
+        i += 2;
+    }
+    for region in regions {
+        if region.label == "formula_number" && !embedded[region.index] {
+            report.add(
+                page.page,
+                Some(region.index),
+                "text-displayed-equations",
+                "Equation number could not be composed with an adjacent formula",
+            );
+        }
+    }
+}
+
 fn embed_captions(regions: &mut [Region], page: usize, report: &mut DppReport) -> Vec<bool> {
     let mut embedded = vec![false; regions.len()];
     for index in 0..regions.len() {
@@ -1281,40 +1354,50 @@ fn inline_markup(text: &str, escape_code: bool) -> String {
         .into_owned()
 }
 
-fn map_code_spans(text: &str, mut prose: impl FnMut(&str) -> String) -> String {
-    // Table cells carry code as `<code>` elements after `cell_markup`.
-    static HTML_CODE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?is)<code\b[^>]*>.*?</code>").unwrap());
-    let mut output = String::new();
-    let mut cursor = 0;
-    for code in HTML_CODE.find_iter(text) {
-        output.push_str(&map_backtick_spans(&text[cursor..code.start()], &mut prose));
-        output.push_str(code.as_str());
-        cursor = code.end();
-    }
-    output.push_str(&map_backtick_spans(&text[cursor..], &mut prose));
-    output
-}
-
-fn map_backtick_spans(text: &str, mut prose: impl FnMut(&str) -> String) -> String {
+fn map_math_prose(text: &str, mut prose: impl FnMut(&str) -> String) -> String {
+    // Code, link destinations and HTML tags retain their literal contents.
+    static MARKUP: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?is)<code\b[^>]*>.*?</code>|`+|\]\(|<(?:[^"'<>]|"[^"]*"|'[^']*')*>"#)
+            .unwrap()
+    });
     static TICKS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`+").unwrap());
-    let runs: Vec<_> = TICKS.find_iter(text).collect();
     let mut output = String::new();
-    let (mut cursor, mut i) = (0, 0);
-    while i < runs.len() {
-        let open = runs[i];
-        if let Some(offset) = runs[i + 1..]
-            .iter()
-            .position(|close| close.len() == open.len())
-        {
-            let close = runs[i + 1 + offset];
-            output.push_str(&prose(&text[cursor..open.start()]));
-            output.push_str(&text[open.start()..close.end()]);
-            cursor = close.end();
-            i += offset + 2;
-        } else {
-            i += 1;
+    let (mut cursor, mut search) = (0, 0);
+    while let Some(marker) = MARKUP.find_at(text, search) {
+        search = marker.end();
+        if matches!(marker.as_str(), "<eq>" | "</eq>") {
+            continue;
         }
+        let end = if marker.as_str().starts_with('`') {
+            TICKS
+                .find_iter(&text[marker.end()..])
+                .find(|close| close.len() == marker.len())
+                .map(|close| marker.end() + close.end())
+        } else if marker.as_str() == "](" {
+            let (mut depth, mut escaped) = (1, false);
+            text[marker.end()..]
+                .char_indices()
+                .find_map(|(offset, ch)| {
+                    if escaped {
+                        escaped = false;
+                        return None;
+                    }
+                    match ch {
+                        '\\' => escaped = true,
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
+                    (depth == 0).then_some(marker.end() + offset + ch.len_utf8())
+                })
+        } else {
+            Some(marker.end())
+        };
+        let Some(end) = end else { continue };
+        output.push_str(&prose(&text[cursor..marker.start()]));
+        output.push_str(&text[marker.start()..end]);
+        cursor = end;
+        search = end;
     }
     output.push_str(&prose(&text[cursor..]));
     output
@@ -1527,6 +1610,52 @@ mod tests {
             ["images-images-and-figures", "output-the-sidecar"]
         );
 
+        let mut equation_number = block("formula_number", "(7)");
+        equation_number.bbox = [0.8, 0.25, 0.9, 0.35];
+        let linked = PageDocument {
+            blocks: vec![
+                block(
+                    "text",
+                    r#"[API $x$](https://example.com/items(foo)?$filter=x&$select=y) <a href="https://example.com/?$filter=x&$select=y" title="> ` \[ $literal">\(y\)</a> `<a href="$z">\(literal\)</a>`"#,
+                ),
+                block("formula", "$$E=mc^2$$"),
+                equation_number,
+                block("formula_number", "(99)"),
+                block("chart", "```mermaid\ngraph TD; A-->B\n```"),
+            ],
+            ..PageDocument::default()
+        }
+        .to_dpp(&context, &DppOptions::default());
+        assert_eq!(
+            linked.sidecar.items[0].md,
+            r#"[API $$x$$](https://example.com/items(foo)?$filter=x&$select=y) <a href="https://example.com/?$filter=x&$select=y" title="> ` \[ $literal">$$y$$</a> `<a href="$z">\(literal\)</a>`"#
+        );
+        let number = &linked.sidecar.items[2];
+        assert_eq!(number.item_type, DppClass::Formula);
+        assert_eq!(
+            linked.sidecar.items[1].md,
+            format!("$$E=mc^2$$ {}", anchored(number, 1))
+        );
+        assert_eq!(linked.markdown.matches("(7)").count(), 1);
+        assert_eq!(linked.sidecar.items[1].b_box.as_ref().unwrap().w, 390.0);
+        assert_eq!(linked.sidecar.items[4].item_type, DppClass::Picture);
+        assert_eq!(
+            linked.sidecar.items[4].md,
+            "```diagram/mermaid\ngraph TD; A-->B\n```"
+        );
+        assert_eq!(
+            linked
+                .report
+                .findings
+                .iter()
+                .map(|f| (f.block_index, f.rule_id.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (Some(2), "output-the-sidecar"),
+                (Some(3), "text-displayed-equations"),
+            ]
+        );
+
         let clean = PageDocument {
             blocks: vec![block("doc_title", "Title"), block("number", "1")],
             diagnostics: vec![crate::ParseDiagnostic {
@@ -1634,7 +1763,7 @@ mod tests {
                 block("text", ""),
                 block(
                     "table",
-                    "| Source | Value |\n| --- | --- |\n| [Report](https://example.com) **1** *2* `$x$` | 1 |",
+                    "| Source | Value |\n| --- | --- |\n| [Report](https://example.com/?$filter=x&$select=y) **1** *2* `$x$` | 1 |",
                 ),
                 block(
                     "table",
@@ -1675,7 +1804,7 @@ mod tests {
         );
         assert!(!output.markdown.contains("image_7.png"));
         for cell in [
-            r#"<td><a href="https://example.com">Report</a> <strong>1</strong> <em>2</em> <code>$x$</code></td>"#,
+            r#"<td><a href="https://example.com/?$filter=x&amp;$select=y">Report</a> <strong>1</strong> <em>2</em> <code>$x$</code></td>"#,
             "<td>$$a*b*c$$</td>",
         ] {
             assert!(output.markdown.contains(cell), "{cell}");
