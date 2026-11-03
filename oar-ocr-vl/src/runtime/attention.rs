@@ -21,7 +21,10 @@
 
 use crate::error::Error;
 use crate::runtime::errors::candle_to_ocr_processing;
-use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
+use candle_core::{
+    CpuStorage, D, DType, Device, IndexOp, InplaceOp1, Layout, Result, Tensor, WithDType,
+};
+use rayon::prelude::*;
 use std::collections::VecDeque;
 
 /// Fused Metal SDPA attempt; `Ok(None)` when unavailable or declined, so
@@ -176,6 +179,56 @@ where
     }
 }
 
+struct ScaleScores(f64);
+
+impl ScaleScores {
+    fn apply<T: WithDType>(&self, values: &mut [T]) {
+        let mul = T::from_f64(self.0);
+        let add = T::from_f64(0.0);
+        values.par_chunks_mut(16 * 1024).for_each(|chunk| {
+            for value in chunk {
+                *value = *value * mul + add;
+            }
+        });
+    }
+}
+
+impl InplaceOp1 for ScaleScores {
+    fn name(&self) -> &'static str {
+        "scale-attention-scores"
+    }
+
+    fn cpu_fwd(&self, storage: &mut CpuStorage, layout: &Layout) -> Result<()> {
+        let (start, end) = layout
+            .contiguous_offsets()
+            .ok_or(candle_core::Error::RequiresContiguous { op: self.name() })?;
+        match storage {
+            CpuStorage::F32(values) => self.apply(&mut values[start..end]),
+            CpuStorage::BF16(values) => self.apply(&mut values[start..end]),
+            CpuStorage::F16(values) => self.apply(&mut values[start..end]),
+            _ => candle_core::bail!("attention score scaling requires F32, BF16 or F16 storage"),
+        }
+        Ok(())
+    }
+}
+
+/// Multiplies attention scores by `scale` with the same arithmetic as `affine(scale, 0.0)`.
+///
+/// Candle's CPU `affine` is single-threaded, so large contiguous CPU score matrices are scaled
+/// in place on the Rayon pool. `scores` must be a fresh matmul output that shares its storage
+/// with no other tensor.
+pub(crate) fn scale_scores(scores: Tensor, scale: f64) -> Result<Tensor> {
+    if !scores.device().is_cpu()
+        || !scores.is_contiguous()
+        || scores.elem_count() < 64 * 1024
+        || !matches!(scores.dtype(), DType::F32 | DType::BF16 | DType::F16)
+    {
+        return scores * scale;
+    }
+    scores.inplace_op1(&ScaleScores(scale))?;
+    Ok(scores)
+}
+
 /// Scaled dot-product attention.
 ///
 /// Computes attention as: softmax(Q @ K^T * scale) @ V
@@ -206,7 +259,7 @@ pub fn scaled_dot_product_attention(
     let attn_weights = q.matmul(&k.transpose(2, 3)?)?;
 
     // Scale
-    let attn_weights = (attn_weights * scale)?;
+    let attn_weights = scale_scores(attn_weights, scale)?;
 
     // Apply mask
     let attn_weights = match mask {
@@ -346,8 +399,8 @@ pub fn scaled_dot_product_attention_gqa(
         }
     };
     let grouped_k = cache_layout(k)?.transpose(2, 3)?;
-    let mut weights =
-        (grouped_q.matmul(&grouped_k)? * scale)?.reshape((batch, num_heads, query_len, kv_len))?;
+    let mut weights = scale_scores(grouped_q.matmul(&grouped_k)?, scale)?
+        .reshape((batch, num_heads, query_len, kv_len))?;
 
     weights = match mask {
         Some(mask) => weights.broadcast_add(mask)?,
@@ -433,7 +486,8 @@ pub fn segmented_scaled_dot_product_attention_gqa(
         }
         let grouped_k = k.reshape((grouped_batch, len, head_dim))?.transpose(1, 2)?;
         score_segments.push(
-            (grouped_q.matmul(&grouped_k)? * scale)?.reshape((batch, num_heads, query_len, len))?,
+            scale_scores(grouped_q.matmul(&grouped_k)?, scale)?
+                .reshape((batch, num_heads, query_len, len))?,
         );
         lengths.push(len);
     }
@@ -1187,6 +1241,73 @@ pub fn select_rope_sections(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_score_scaling_matches_affine_bits() -> Result<()> {
+        let edges = [
+            0.0,
+            -0.0,
+            f32::from_bits(1),
+            -f32::from_bits(1),
+            f32::from_bits(0x10000),
+            -f32::from_bits(0x10000),
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        let values: Vec<_> = (0..128 * 1024 + 7)
+            .map(|i| {
+                if i % 31 < edges.len() {
+                    edges[i % 31]
+                } else {
+                    ((i * 37 % 1009) as f32 - 504.0) / 97.0
+                }
+            })
+            .collect();
+        for dtype in [DType::F32, DType::BF16, DType::F16] {
+            let bits = |tensor: Tensor| -> Result<Vec<u32>> {
+                if dtype == DType::F32 {
+                    Ok(tensor
+                        .to_vec1::<f32>()?
+                        .into_iter()
+                        .map(f32::to_bits)
+                        .collect())
+                } else if dtype == DType::BF16 {
+                    Ok(tensor
+                        .to_vec1::<half::bf16>()?
+                        .into_iter()
+                        .map(|value| u32::from(value.to_bits()))
+                        .collect())
+                } else {
+                    Ok(tensor
+                        .to_vec1::<half::f16>()?
+                        .into_iter()
+                        .map(|value| u32::from(value.to_bits()))
+                        .collect())
+                }
+            };
+            for scale in [
+                1.0 / 80f64.sqrt(),
+                // Direct f64-to-bf16 rounding just above a midpoint.
+                1.00390625 + f64::EPSILON,
+                0.125,
+                -0.125,
+                0.0,
+                1.0,
+            ] {
+                let scores = Tensor::new(values.as_slice(), &Device::Cpu)?
+                    .to_dtype(dtype)?
+                    .narrow(0, 1, values.len() - 1)?;
+                let expected = bits(scores.affine(scale, 0.0)?)?;
+                let actual = bits(scale_scores(scores, scale)?)?;
+                for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                    assert_eq!(actual, expected, "{dtype:?}, scale={scale}, index={index}");
+                }
+            }
+        }
+        Ok(())
+    }
 
     fn check_gqa_cache_views(device: &Device, dtype: DType) -> Result<()> {
         let (batch, groups, len, cap, dim) = (2, 3, 7, 13, 16);

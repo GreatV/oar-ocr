@@ -1,6 +1,7 @@
 use super::config::{HunyuanOcrVersion, HunyuanOcrVisionConfig};
 use crate::attention::flash_attention;
 use crate::error::Error;
+use crate::runtime::attention::scale_scores;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, LayerNorm, LayerNormConfig, Linear, Module};
@@ -327,8 +328,8 @@ impl VisionAttention {
             };
             let attn = q_use
                 .matmul(&kt_attn)
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "vit attn qk matmul", e))?
-                .affine(self.scaling, 0.0)
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "vit attn qk matmul", e))?;
+            let attn = scale_scores(attn, self.scaling)
                 .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "vit attn scaling", e))?;
             let attn = if use_f32 {
                 candle_nn::ops::softmax_last_dim(&attn)

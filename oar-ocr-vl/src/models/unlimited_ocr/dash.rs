@@ -14,6 +14,7 @@ use super::config::UnlimitedOcrConfig;
 use super::infer;
 use crate::Error;
 use crate::backbones::deepseek_v2::FeedForward;
+use crate::runtime::attention::scale_scores;
 use crate::runtime::cache::TrimmableKvCache;
 use candle_core::{D, DType, Device, Tensor};
 use candle_nn::{
@@ -450,9 +451,7 @@ impl Router {
     /// Scores `(queries, blocks)` of router queries against block keys.
     fn scores(&self, queries: &Tensor, block_keys: &Tensor) -> candle_core::Result<Vec<Vec<f32>>> {
         let dim = queries.dim(D::Minus1)?;
-        queries
-            .matmul(&block_keys.t()?)?
-            .affine(1.0 / (dim as f64).sqrt(), 0.0)?
+        scale_scores(queries.matmul(&block_keys.t()?)?, 1.0 / (dim as f64).sqrt())?
             .clamp(-ACT_CLAMP, ACT_CLAMP)?
             .to_vec2::<f32>()
     }
@@ -621,7 +620,7 @@ impl Attention {
                 .narrow(2, start, rows)
                 .and_then(|q| q.matmul(&kt))
                 .and_then(|l| l.to_dtype(DType::F32))
-                .and_then(|l| l.affine(scale, 0.0))
+                .and_then(|l| scale_scores(l, scale))
                 .and_then(|l| l.broadcast_add(&mask.unsqueeze(0)?.unsqueeze(0)?))
                 .map_err(infer)?;
             let probs = candle_nn::ops::softmax_last_dim(&logits)
@@ -740,7 +739,7 @@ impl Attention {
         let logits = q
             .to_dtype(DType::F32)
             .and_then(|q| q.matmul(&gather(&keys)?.transpose(2, 3)?))
-            .and_then(|l| l.affine(scale, 0.0)?.broadcast_add(&bias))
+            .and_then(|l| scale_scores(l, scale)?.broadcast_add(&bias))
             .map_err(infer)?;
         let context = candle_nn::ops::softmax_last_dim(&logits)
             .and_then(|p| p.matmul(&gather(&values)?))
