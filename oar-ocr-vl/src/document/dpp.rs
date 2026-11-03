@@ -813,8 +813,22 @@ fn format_content(
     let text = content.trim();
     if class == Code {
         let body = content.trim_matches(['\r', '\n']).trim_end();
-        return if body.trim_start().starts_with("```") || body.trim_start().starts_with("~~~") {
-            body.into()
+        let start = body.trim_start();
+        let fenced = ['`', '~']
+            .into_iter()
+            .find(|&ch| start.starts_with(&ch.to_string().repeat(3)));
+        return if let Some(ch) = fenced {
+            // Close a truncated fence so it cannot swallow the blocks that follow.
+            let fence = &start[..start.len() - start.trim_start_matches(ch).len()];
+            let closed = start.lines().skip(1).any(|line| {
+                let line = line.trim();
+                line.len() >= fence.len() && line.chars().all(|c| c == ch)
+            });
+            if closed {
+                body.into()
+            } else {
+                format!("{body}\n{fence}")
+            }
         } else {
             let longest = body.split(|ch| ch != '`').map(str::len).max().unwrap_or(0);
             let fence = "`".repeat((longest + 1).max(3));
@@ -1325,7 +1339,7 @@ fn inline_markup(text: &str, escape_code: bool) -> String {
     static MARKUP: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(concat!(
             r"(?P<math>\$\$.*?\$\$|\$[^$]+\$|\\\(.*?\\\))|",
-            r"\[(?P<text>[^\]]*)\]\((?P<href>[^)\s]*)\)|",
+            r"\[(?P<text>[^\]]*)\]\((?P<href>(?:[^()\s]|\([^()\s]*\))*)\)|",
             r"`(?P<code>[^`]+)`|",
             r"\*\*(?P<strong>[^*\s](?:[^*]*[^*\s])?)\*\*|",
             r"\*(?P<em>[^*\s](?:[^*]*[^*\s])?)\*",
@@ -1501,6 +1515,7 @@ mod tests {
                 block("formula", "$x$"),
                 block("text", "Unpaired $value"),
                 block("code", "a: 1\n---\nb: 2"),
+                block("code", "```python\nprint(1)"),
                 block("formula", r"P = \$5"),
             ],
             markdown: Some("Cached profile Markdown".into()),
@@ -1528,6 +1543,7 @@ mod tests {
             "## Part- Heading",
             "<tr><td></td><td>c</td></tr>",
             "```\na: 1\n---\nb: 2\n```",
+            "```python\nprint(1)\n```",
             r"$$P = \$5$$",
         ] {
             assert!(output.markdown.contains(fragment), "{fragment}");
@@ -1763,7 +1779,7 @@ mod tests {
                 block("text", ""),
                 block(
                     "table",
-                    "| Source | Value |\n| --- | --- |\n| [Report](https://example.com/?$filter=x&$select=y) **1** *2* `$x$` | 1 |",
+                    "| Source | Value |\n| --- | --- |\n| [Report](https://example.com/a_(b)?$filter=x&$select=y) **1** *2* `$x$` | 1 |",
                 ),
                 block(
                     "table",
@@ -1804,7 +1820,7 @@ mod tests {
         );
         assert!(!output.markdown.contains("image_7.png"));
         for cell in [
-            r#"<td><a href="https://example.com/?$filter=x&amp;$select=y">Report</a> <strong>1</strong> <em>2</em> <code>$x$</code></td>"#,
+            r#"<td><a href="https://example.com/a_(b)?$filter=x&amp;$select=y">Report</a> <strong>1</strong> <em>2</em> <code>$x$</code></td>"#,
             "<td>$$a*b*c$$</td>",
         ] {
             assert!(output.markdown.contains(cell), "{cell}");
