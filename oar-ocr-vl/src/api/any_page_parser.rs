@@ -190,6 +190,15 @@ const MODEL_IDS: &[(&str, AnyPageParserModel)] = &[
 ];
 
 impl AnyPageParserModel {
+    /// Pages to send per `parse_document` request: 10 for Unlimited-OCR-2, its
+    /// official SGLang page window, and 1 for models that parse pages independently.
+    pub fn pages_per_request(&self) -> usize {
+        match self {
+            Self::UnlimitedOcr2 => 10,
+            _ => 1,
+        }
+    }
+
     /// The canonical Hugging Face repo ID, for manifests and CLIs.
     pub fn as_str(self) -> &'static str {
         match self {
