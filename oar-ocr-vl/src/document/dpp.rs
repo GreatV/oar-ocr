@@ -1371,7 +1371,7 @@ fn inline_markup(text: &str, escape_code: bool) -> String {
 fn map_math_prose(text: &str, mut prose: impl FnMut(&str) -> String) -> String {
     // Code, link destinations and HTML tags retain their literal contents.
     static MARKUP: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#"(?is)<code\b[^>]*>.*?</code>|`+|\]\(|<(?:[^"'<>]|"[^"]*"|'[^']*')*>"#)
+        Regex::new(r#"(?is)<code\b[^>]*>.*?</code>|`+|\]\(|</?[a-z][a-z0-9-]*(?:\s(?:[^"'<>]|"[^"]*"|'[^']*')*)?/?>"#)
             .unwrap()
     });
     static TICKS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`+").unwrap());
@@ -1514,6 +1514,7 @@ mod tests {
                 block("section-header", "# Part-\nHeading"),
                 block("formula", "$x$"),
                 block("text", "Unpaired $value"),
+                block("text", r"Let $x < y$ and $z > w$, \(a<b\) and \(c>d\)"),
                 block("code", "a: 1\n---\nb: 2"),
                 block("code", "```python\nprint(1)"),
                 block("formula", r"P = \$5"),
@@ -1544,6 +1545,7 @@ mod tests {
             "<tr><td></td><td>c</td></tr>",
             "```\na: 1\n---\nb: 2\n```",
             "```python\nprint(1)\n```",
+            "Let $$x < y$$ and $$z > w$$, $$a<b$$ and $$c>d$$",
             r"$$P = \$5$$",
         ] {
             assert!(output.markdown.contains(fragment), "{fragment}");
