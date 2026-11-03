@@ -63,6 +63,16 @@ struct Document {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // Candle reads this on every CPU matmul and otherwise re-reads /proc/cpuinfo.
+    if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+        let threads = if matches!(&cli.command, Command::Parse(_)) {
+            default_cpu_threads()
+        } else {
+            4
+        };
+        // SAFETY: The process is still single-threaded.
+        unsafe { std::env::set_var("RAYON_NUM_THREADS", threads.to_string()) };
+    }
     tracing_subscriber::fmt()
         .with_max_level(if cli.verbose {
             tracing::Level::INFO
@@ -88,9 +98,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         return Ok(());
     }
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(4)
-        .build_global()?;
+    rayon::ThreadPoolBuilder::new().build_global()?;
     let (paths, json) = match &cli.command {
         Command::Ocr(args) => (&args.images, args.format == OcrFormat::Json),
         Command::Structure(args) => (&args.images, args.format == PageFormat::Json),
@@ -419,13 +427,17 @@ where
     }
 }
 
+fn default_cpu_threads() -> usize {
+    std::thread::available_parallelism().map_or(4, |count| count.get().min(8))
+}
+
 fn classic_device(device: &str, verbose: bool) -> Result<OrtSessionConfig> {
     let config = ort_device(device, verbose)?;
     // Intra-op scaling flattens out around eight threads on CPU.
     let threads = if config.has_accelerator_provider() {
         4
     } else {
-        std::thread::available_parallelism().map_or(4, |count| count.get().min(8))
+        default_cpu_threads()
     };
     Ok(config.with_intra_threads(threads))
 }

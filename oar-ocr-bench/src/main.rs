@@ -181,8 +181,12 @@ fn run(
                 save_outputs: save_outputs.clone(),
             })?,
         )?;
+        let mut worker = Command::new(&executable);
+        if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+            worker.env("RAYON_NUM_THREADS", case.options.cpu_threads().to_string());
+        }
         // Worker warnings go straight to the terminal; failures are kept in the report.
-        let status = Command::new(&executable)
+        let status = worker
             .args(["run-case", "--request"])
             .arg(&request)
             .arg("--output")
