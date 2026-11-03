@@ -1215,7 +1215,7 @@ fn embed_captions(regions: &mut [Region], page: usize, report: &mut DppReport) -
         let caption = if md.starts_with("<caption>") && md.ends_with("</caption>") {
             md.clone()
         } else {
-            format!("<caption>{md}</caption>")
+            format!("<caption>{}</caption>", inline_markup(md))
         };
         regions[index].item.md = caption;
         let fragment = anchored(&regions[index].item, page);
@@ -1240,6 +1240,14 @@ fn embed_captions(regions: &mut [Region], page: usize, report: &mut DppReport) -
 fn cell_markup(html: &str) -> String {
     static CELL: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(<t[dh]>)(.*?)(</t[dh]>)").unwrap());
+    CELL.replace_all(html, |cell: &regex::Captures<'_>| {
+        format!("{}{}{}", &cell[1], inline_markup(&cell[2]), &cell[3])
+    })
+    .into_owned()
+}
+
+/// Converts Markdown emphasis, code spans and links to HTML, leaving math untouched.
+fn inline_markup(text: &str) -> String {
     static MARKUP: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(concat!(
             r"(?P<math>\$\$.*?\$\$|\$[^$]+\$|\\\(.*?\\\))|",
@@ -1250,8 +1258,8 @@ fn cell_markup(html: &str) -> String {
         ))
         .unwrap()
     });
-    CELL.replace_all(html, |cell: &regex::Captures<'_>| {
-        let body = MARKUP.replace_all(&cell[2], |caps: &regex::Captures<'_>| {
+    MARKUP
+        .replace_all(text, |caps: &regex::Captures<'_>| {
             if let Some(code) = caps.name("code") {
                 format!("<code>{}</code>", code.as_str())
             } else if let Some(text) = caps.name("strong") {
@@ -1263,10 +1271,8 @@ fn cell_markup(html: &str) -> String {
             } else {
                 caps[0].to_string()
             }
-        });
-        format!("{}{body}{}", &cell[1], &cell[3])
-    })
-    .into_owned()
+        })
+        .into_owned()
 }
 
 fn map_code_spans(text: &str, mut prose: impl FnMut(&str) -> String) -> String {
@@ -1389,7 +1395,7 @@ mod tests {
                     "table",
                     r#"<table><tr><td title="cell"><eq>$x$</eq></td></tr></table>"#,
                 ),
-                block("figure_title", "Results"),
+                block("figure_title", "*Results*"),
                 block("footer", "End"),
                 block("formula", r"\[x=y\tag{1}\]"),
                 block("formula", r"$$\frac{x}{y} \tag*{(2)}$$"),
@@ -1441,7 +1447,7 @@ mod tests {
         assert_eq!(
             output
                 .markdown
-                .matches("<caption>Results</caption>")
+                .matches("<caption><em>Results</em></caption>")
                 .count(),
             1
         );
