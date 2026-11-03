@@ -720,13 +720,10 @@ fn check_continuation(pages: &[LoweredPage], report: &mut DppReport) {
     for pair in pages.windows(2) {
         let left = pair[0].tables.last();
         let right = pair[1].tables.first();
-        let mismatch = match (left, right) {
-            (Some(a), Some(b)) => a.to.zip(b.from).is_some_and(|(a, b)| a != b),
-            (Some(a), None) => a.to == Some(true),
-            (None, Some(b)) => b.from == Some(true),
-            (None, None) => false,
-        };
-        if mismatch {
+        // Unset flags are written to the sidecar as `false`, so compare them as such.
+        let continues = left.is_some_and(|a| a.to == Some(true));
+        let continued = right.is_some_and(|b| b.from == Some(true));
+        if continues != continued {
             for (page, edge) in [(pair[0].page.page, left), (pair[1].page.page, right)] {
                 report.add(
                     page,
@@ -1273,6 +1270,21 @@ fn cell_markup(html: &str) -> String {
 }
 
 fn map_code_spans(text: &str, mut prose: impl FnMut(&str) -> String) -> String {
+    // Table cells carry code as `<code>` elements after `cell_markup`.
+    static HTML_CODE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?is)<code\b[^>]*>.*?</code>").unwrap());
+    let mut output = String::new();
+    let mut cursor = 0;
+    for code in HTML_CODE.find_iter(text) {
+        output.push_str(&map_backtick_spans(&text[cursor..code.start()], &mut prose));
+        output.push_str(code.as_str());
+        cursor = code.end();
+    }
+    output.push_str(&map_backtick_spans(&text[cursor..], &mut prose));
+    output
+}
+
+fn map_backtick_spans(text: &str, mut prose: impl FnMut(&str) -> String) -> String {
     static TICKS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`+").unwrap());
     let runs: Vec<_> = TICKS.find_iter(text).collect();
     let mut output = String::new();
@@ -1581,17 +1593,8 @@ mod tests {
             unknown.sidecar[0].items[0].continues_on_next_page,
             Some(false)
         );
-        assert!(
-            !unknown
-                .report
-                .findings
-                .iter()
-                .any(|f| f.rule_id == "tables-cross-page-tables")
-        );
-        contexts[0].blocks = vec![table_options(0, false, false)];
         assert_eq!(
-            document
-                .to_dpp(&contexts, &DppOptions::default())
+            unknown
                 .report
                 .findings
                 .iter()
@@ -1619,7 +1622,7 @@ mod tests {
                 block("text", ""),
                 block(
                     "table",
-                    "| Source | Value |\n| --- | --- |\n| [Report](https://example.com) **1** *2* `x` | 1 |",
+                    "| Source | Value |\n| --- | --- |\n| [Report](https://example.com) **1** *2* `$x$` | 1 |",
                 ),
                 block(
                     "table",
@@ -1660,7 +1663,7 @@ mod tests {
         );
         assert!(!output.markdown.contains("image_7.png"));
         for cell in [
-            r#"<td><a href="https://example.com">Report</a> <strong>1</strong> <em>2</em> <code>x</code></td>"#,
+            r#"<td><a href="https://example.com">Report</a> <strong>1</strong> <em>2</em> <code>$x$</code></td>"#,
             "<td>$$a*b*c$$</td>",
         ] {
             assert!(output.markdown.contains(cell), "{cell}");
