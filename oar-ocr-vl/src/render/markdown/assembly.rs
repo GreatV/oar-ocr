@@ -12,8 +12,27 @@ fn label(element: &LayoutElement) -> &str {
         .as_deref()
         .unwrap_or(element.element_type.as_str())
 }
-fn formula(element: &LayoutElement) -> bool {
-    matches!(label(element), "formula" | "display_formula")
+pub(crate) fn formula_number_pair(
+    first: &str,
+    second: &str,
+    mode: FormulaNumberComposition,
+) -> Option<(usize, usize)> {
+    if matches!(
+        mode,
+        FormulaNumberComposition::None | FormulaNumberComposition::SeparateParagraph
+    ) {
+        return None;
+    }
+    if matches!(first, "formula" | "display_formula") && second == "formula_number" {
+        Some((0, 1))
+    } else if mode == FormulaNumberComposition::AdjacentTag
+        && first == "formula_number"
+        && matches!(second, "formula" | "display_formula")
+    {
+        Some((1, 0))
+    } else {
+        None
+    }
 }
 
 pub(crate) fn compose_formula_numbers(
@@ -31,16 +50,9 @@ pub(crate) fn compose_formula_numbers(
     while i < elements.len() {
         let item = &elements[i];
         let next = elements.get(i + 1);
-        let pair = if formula(item) && next.is_some_and(|e| label(e) == "formula_number") {
-            next.map(|number| (item, number))
-        } else if mode == FormulaNumberComposition::AdjacentTag
-            && label(item) == "formula_number"
-            && next.is_some_and(formula)
-        {
-            next.map(|formula| (formula, item))
-        } else {
-            None
-        };
+        let pair = next
+            .and_then(|next| formula_number_pair(label(item), label(next), mode))
+            .map(|(formula, number)| (&elements[i + formula], &elements[i + number]));
         if let Some((formula, number)) = pair {
             let mut combined = formula.clone();
             if let Some(content) = &formula.text {

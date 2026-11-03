@@ -136,7 +136,7 @@ impl TableFigures {
                 let Some(index) = figure.index else {
                     return capture[0].to_string();
                 };
-                let mut restored = format!("<img src=\"image_{}.png\" alt=\"Image\" />", index + 1);
+                let mut restored = crate::render::table::table_figure_image(index);
                 if let Some(text) = elements[index]
                     .text
                     .as_deref()

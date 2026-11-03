@@ -132,6 +132,24 @@ pub(crate) fn normalize_math_delimiters(input: &str, options: &DelimiterOptions)
     text
 }
 
+pub(crate) fn map_html_equations(
+    content: &str,
+    mut outside: impl FnMut(&str) -> String,
+    mut equation: impl FnMut(&str) -> String,
+) -> String {
+    static EQ: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<eq>(.*?)</eq>").unwrap());
+    let mut output = String::new();
+    let mut start = 0;
+    for caps in EQ.captures_iter(content) {
+        let span = caps.get(0).unwrap();
+        output.push_str(&outside(&content[start..span.start()]));
+        output.push_str(&equation(&caps[1]));
+        start = span.end();
+    }
+    output.push_str(&outside(&content[start..]));
+    output
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) enum MathStripping {
     #[default]

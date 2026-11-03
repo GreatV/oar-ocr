@@ -145,6 +145,14 @@ HunyuanOCR 1.5's `generate_joint(&images, instruction, max_new_tokens)` and Ovis
 
 HPD-Parsing and MonkeyOCRv2 page results include the raw model output alongside the parsed blocks and Markdown. The two MinerU parsers share layout and equation post-processing. Layout-composed backends receive each region's original label, so MiniCPM-OCR uses its seal and inline-formula prompts and per-label token budgets, capped by the caller's limit.
 
+### DPP export
+
+`PageDocument::to_dpp(&context, &options)` and `DocumentOutput::to_dpp(&contexts, &options)` export [Document Parsing Protocol](https://www.parseprotocol.com/guide), pinned to draft `a9c49e2`. `DppOutput` holds the Markdown, the JSON sidecar (one page object, or an array of pages for a document) and a report of the rules the output could not meet.
+
+Supply dimensions with `DppPageContext::default().with_dimensions(width, height)`. `DppOptions::default()` uses input-image pixels; select `document::dpp::DppCoordinateSpace::PdfPoints` with `with_coordinate_space` for PDF-point dimensions. With page preprocessing, use the prepared canvas dimensions.
+
+To retain headers, footers and footnotes in layout-composed input, pass `DocParserOptions::default().with_skip_auxiliary_regions(false).with_auxiliary_labels(Vec::new()).with_markdown_ignore_labels(Vec::new())` through `AnyPageParserOptions::with_doc_parser_options`. Supply table continuation flags through `DppBlockOptions` in each page context.
+
 ## Installation
 
 This crate is self-contained: everything runs on Candle, it does not depend on `oar-ocr-core`, and **no build of it links ONNX Runtime**.

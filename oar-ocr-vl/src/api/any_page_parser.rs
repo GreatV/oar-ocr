@@ -4,7 +4,7 @@
 use crate::api::download::AnyPageParserPretrainedOptions;
 use crate::api::error::Error;
 use crate::api::page_parser::PageParser;
-use crate::api::recognition::RecognitionBackend;
+use crate::api::recognition::{DocParserOptions, RecognitionBackend};
 use crate::document::page::PageDocument;
 use crate::glmocr::GlmOcr;
 use crate::hpd_parsing::{HpdGenerationConfig, HpdParsing};
@@ -36,7 +36,7 @@ use std::str::FromStr;
 ///
 /// Each knob is optional: `None` keeps the wrapped parser's own default, and
 /// `Some` overrides only that knob, leaving every model-specific option at its
-/// default.
+/// default. `doc_parser` overrides apply to the layout-composed parsers.
 ///
 /// - `max_new_tokens` maps to each model's generation budget:
 ///   `HpdGenerationConfig::max_new_tokens`, the `max_new_tokens` fields of the
@@ -56,9 +56,18 @@ pub struct AnyPageParserOptions {
     /// Maximum same-task region batch size. `None` keeps the model default;
     /// parsers without region batching ignore this knob.
     pub region_batch_size: Option<usize>,
+    /// Document overrides for layout-composed parsers. `max_new_tokens` takes
+    /// precedence over the document token limit.
+    pub doc_parser: DocParserOptions,
 }
 
 impl AnyPageParserOptions {
+    /// Set document overrides for layout-composed parsers.
+    pub fn with_doc_parser_options(mut self, options: DocParserOptions) -> Self {
+        self.doc_parser = options;
+        self
+    }
+
     /// Override the generation budget for this page.
     pub fn with_max_new_tokens(mut self, max_new_tokens: usize) -> Self {
         self.max_new_tokens = Some(max_new_tokens);
@@ -791,7 +800,7 @@ fn layout_options<L: LayoutSource, B: RecognitionBackend>(
     _parser: &LayoutPageParser<L, B>,
     options: &AnyPageParserOptions,
 ) -> LayoutPageParserOptions {
-    let mut document = crate::DocParserOptions::default();
+    let mut document = options.doc_parser.clone();
     if let Some(max_new_tokens) = options.max_new_tokens {
         document = document.with_max_tokens(max_new_tokens);
     }
@@ -1038,6 +1047,27 @@ mod tests {
         assert_eq!(produced.doc_parser.max_tokens, Some(777));
         assert!(produced.config.is_none());
         assert_eq!(produced.region_batch_size, Some(5));
+
+        let produced = layout_options(
+            &parser,
+            &AnyPageParserOptions::default().with_doc_parser_options(
+                DocParserOptions::default()
+                    .with_max_tokens(333)
+                    .with_skip_auxiliary_regions(false)
+                    .with_auxiliary_labels(Vec::new())
+                    .with_markdown_ignore_labels(Vec::new()),
+            ),
+        );
+        assert_eq!(produced.doc_parser.max_tokens, Some(333));
+        assert_eq!(produced.doc_parser.skip_auxiliary_regions, Some(false));
+        assert!(produced.doc_parser.auxiliary_labels.unwrap().is_empty());
+        assert!(
+            produced
+                .doc_parser
+                .markdown_ignore_labels
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1058,7 +1088,9 @@ mod tests {
                 &image,
                 &layout_options(
                     &parser,
-                    &AnyPageParserOptions::default().with_max_new_tokens(555),
+                    &AnyPageParserOptions::default()
+                        .with_doc_parser_options(DocParserOptions::default().with_max_tokens(333))
+                        .with_max_new_tokens(555),
                 ),
             )
             .unwrap();
