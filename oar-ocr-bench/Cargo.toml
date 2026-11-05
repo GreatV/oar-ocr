@@ -26,7 +26,7 @@ oar-ocr = { path = "..", features = ["auto-download"] }
 oar-ocr-vl = { path = "../oar-ocr-vl" }
 # Same exact pin as oar-ocr-core; used directly to verify that an explicitly
 # requested execution provider registers.
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std"] }
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std"] }
 rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true

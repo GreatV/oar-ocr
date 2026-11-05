@@ -34,7 +34,7 @@ image.workspace = true
 oar-ocr = { version = "0.10.2", path = "..", default-features = false }
 oar-ocr-vl = { version = "0.10.2", path = "../oar-ocr-vl", default-features = false }
 # Only explicit accelerator registration needs the ORT SDK directly.
-ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std"] }
+ort = { version = "=2.0.0-rc.15", optional = true, default-features = false, features = ["std"] }
 rayon.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
