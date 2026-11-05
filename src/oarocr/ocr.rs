@@ -785,11 +785,13 @@ impl OAROCR {
 
         // Phase 3: assemble per-image results (reading order + rotate-back).
         let mut results = Vec::with_capacity(prepared.len());
-        for (img_idx, ((input_img_arc, preprocess), image_results)) in
-            prepared.into_iter().zip(per_image_results).enumerate()
+        for (img_idx, (((input_img_arc, preprocess), image_results), boxes)) in prepared
+            .into_iter()
+            .zip(per_image_results)
+            .zip(all_detection_boxes)
+            .enumerate()
         {
-            let mut text_regions: Vec<crate::oarocr::TextRegion> =
-                image_results.into_iter().flatten().collect();
+            let mut text_regions = Self::regions_for_all_detections(boxes, image_results);
 
             if let Some(rot) = preprocess.rotation {
                 Self::rotate_text_regions_back(&mut text_regions, rot);
@@ -1046,6 +1048,27 @@ impl OAROCR {
         Ok(())
     }
 
+    /// One region per detection box, in detection order. A box whose crop
+    /// failed (or that got no recognition result) is kept with `text: None`
+    /// and `confidence: None` instead of being dropped, so callers still see
+    /// that text was detected there.
+    fn regions_for_all_detections(
+        boxes: Vec<BoundingBox>,
+        results: Vec<Option<crate::oarocr::TextRegion>>,
+    ) -> Vec<crate::oarocr::TextRegion> {
+        boxes
+            .into_iter()
+            .zip(results)
+            .map(|(bbox, result)| {
+                result.unwrap_or_else(|| {
+                    let mut region = crate::oarocr::TextRegion::new(bbox.clone());
+                    region.dt_poly = Some(bbox);
+                    region
+                })
+            })
+            .collect()
+    }
+
     fn rotate_text_regions_back(
         regions: &mut [crate::oarocr::TextRegion],
         rot: crate::oarocr::preprocess::OrientationCorrection,
@@ -1235,6 +1258,28 @@ impl OAROCR {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detections_without_a_recognition_result_are_kept_without_text() {
+        let a = BoundingBox::from_coords(0.0, 0.0, 10.0, 5.0);
+        let b = BoundingBox::from_coords(0.0, 10.0, 10.0, 15.0);
+        let recognized = crate::oarocr::TextRegion::with_recognition(
+            a.clone(),
+            Some(std::sync::Arc::from("hello")),
+            Some(0.9),
+        );
+        let regions =
+            OAROCR::regions_for_all_detections(vec![a, b.clone()], vec![Some(recognized), None]);
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].text.as_deref(), Some("hello"));
+        assert_eq!(regions[1].text, None);
+        assert_eq!(regions[1].confidence, None);
+        assert_eq!(regions[1].bounding_box.points, b.points);
+        assert_eq!(
+            regions[1].dt_poly.as_ref().map(|p| &p.points),
+            Some(&b.points)
+        );
+    }
 
     #[test]
     fn pp_ocrv6_preset_sets_names_and_official_detection_defaults() {
