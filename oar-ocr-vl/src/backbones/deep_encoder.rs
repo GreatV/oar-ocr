@@ -10,7 +10,7 @@
 //! projector to the decoder width.
 
 use crate::error::Error;
-use crate::runtime::attention::scaled_dot_product_attention;
+use crate::runtime::attention::{scale_scores, scaled_dot_product_attention};
 use crate::runtime::errors::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{
@@ -362,9 +362,7 @@ impl SamAttention {
                     &rel_h,
                     &rel_w,
                 )?;
-                let scores = q_chunk
-                    .matmul(&k_t.i(head)?)?
-                    .affine(scale, 0.0)?
+                let scores = scale_scores(q_chunk.matmul(&k_t.i(head)?)?, scale)?
                     .to_dtype(DType::F32)?
                     .broadcast_add(&bias)?;
                 let weights = candle_nn::ops::softmax_last_dim(&scores)?.to_dtype(q.dtype())?;

@@ -1,5 +1,6 @@
 use super::config::PaddleOcrVlVisionConfig;
 use crate::error::Error;
+use crate::runtime::attention::scale_scores;
 use crate::runtime::tensor::apply_rotary_f32;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
@@ -274,8 +275,8 @@ impl VisionAttention {
             // shifts low-confidence argmax tokens.
             let scores = q
                 .matmul(&kt)
-                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision qk matmul", e))?
-                .affine(self.scale, 0.0)
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision qk matmul", e))?;
+            let scores = scale_scores(scores, self.scale)
                 .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision scaling", e))?;
             let probs =
                 candle_nn::ops::softmax_last_dim(&scores.to_dtype(DType::F32).map_err(|e| {
@@ -299,15 +300,12 @@ impl VisionAttention {
                 let q_chunk = q
                     .narrow(2, start, len)
                     .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision q narrow", e))?;
-                let scores = q_chunk
-                    .matmul(&kt)
-                    .map_err(|e| {
-                        candle_to_ocr_inference("PaddleOCR-VL", "vision qk matmul (chunk)", e)
-                    })?
-                    .affine(self.scale, 0.0)
-                    .map_err(|e| {
-                        candle_to_ocr_inference("PaddleOCR-VL", "vision scaling (chunk)", e)
-                    })?;
+                let scores = q_chunk.matmul(&kt).map_err(|e| {
+                    candle_to_ocr_inference("PaddleOCR-VL", "vision qk matmul (chunk)", e)
+                })?;
+                let scores = scale_scores(scores, self.scale).map_err(|e| {
+                    candle_to_ocr_inference("PaddleOCR-VL", "vision scaling (chunk)", e)
+                })?;
                 let probs = candle_nn::ops::softmax_last_dim(
                     &scores.to_dtype(DType::F32).map_err(|e| {
                         candle_to_ocr_inference("PaddleOCR-VL", "vision attn cast f32 (chunk)", e)
