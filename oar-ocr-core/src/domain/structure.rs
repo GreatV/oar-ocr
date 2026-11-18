@@ -1048,19 +1048,6 @@ impl StructureResult {
             .replace('\'', "&#39;")
     }
 
-    /// Serializes the full internal result to a JSON value.
-    ///
-    /// Deprecated in favor of [`to_json`](Self::to_json), the documented page
-    /// format shared with the vision-language pipeline. For the raw internal
-    /// shape, call `serde_json::to_value(&result)` directly.
-    #[deprecated(
-        since = "0.10.1",
-        note = "use `to_json(width, height)` for the shared page format, or `serde_json::to_value` for the raw result"
-    )]
-    pub fn to_json_value(&self) -> serde_json::Result<serde_json::Value> {
-        serde_json::to_value(self)
-    }
-
     /// Exports this page in the shared page JSON format.
     ///
     /// This is the versioned interchange format documented in

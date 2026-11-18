@@ -180,6 +180,7 @@ pub enum OrtExecutionProvider {
 /// This struct contains various configuration options for ONNX Runtime sessions,
 /// including threading, memory management, and optimization settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct OrtSessionConfig {
     /// Number of threads used to parallelize execution within nodes
     pub intra_threads: Option<usize>,

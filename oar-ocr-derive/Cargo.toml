@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "Internal procedural derive macros for oar-ocr (implementation detail, not for direct use)"
 readme = "README.md"
 keywords = ["oar-ocr", "internal"]

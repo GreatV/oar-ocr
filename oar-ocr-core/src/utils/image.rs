@@ -386,6 +386,7 @@ pub enum PaddingStrategy {
 
 /// Configuration for resize-and-pad operations.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ResizePadConfig {
     /// Target dimensions (width, height)
     pub target_dims: (u32, u32),
@@ -488,6 +489,7 @@ pub fn resize_and_pad(
 
 /// Configuration for OCR-style resize-and-pad operations with width constraints.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct OCRResizePadConfig {
     /// Target height
     pub target_height: u32,

@@ -796,7 +796,7 @@ impl OAROCR {
         Ok(self
             .predict_with_rows(images)?
             .into_iter()
-            .map(|(page, _)| page)
+            .map(|prediction| prediction.page)
             .collect())
     }
 
@@ -804,7 +804,7 @@ impl OAROCR {
     pub fn predict_with_rows(
         &self,
         images: Vec<image::RgbImage>,
-    ) -> Result<Vec<(crate::oarocr::OAROCRResult, Vec<usize>)>, OCRError> {
+    ) -> Result<Vec<crate::oarocr::OAROCRPageWithRows>, OCRError> {
         use crate::oarocr::preprocess::DocumentPreprocessor;
         use std::sync::Arc;
 
@@ -904,8 +904,8 @@ impl OAROCR {
                 Self::rotate_text_regions_back(&mut text_regions, rot);
             }
 
-            results.push((
-                crate::oarocr::OAROCRResult {
+            results.push(crate::oarocr::OAROCRPageWithRows {
+                page: crate::oarocr::OAROCRResult {
                     input_path: Arc::from(format!("image_{}", img_idx)),
                     index: img_idx,
                     input_img: input_img_arc,
@@ -919,8 +919,8 @@ impl OAROCR {
                     },
                     rectified_img: preprocess.rectified_img,
                 },
-                rows,
-            ));
+                row_ids: rows,
+            });
         }
 
         Ok(results)

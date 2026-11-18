@@ -138,11 +138,17 @@ impl PdfDocument {
 
         // Render the page using hayro's render function
         let interpreter_settings = hayro::hayro_interpret::InterpreterSettings::default();
+        // Match the unhinted glyph outlines rendered by hayro 0.8.
+        let render_settings = hayro::RenderSettings {
+            hinting: false,
+            glyph_caching: false,
+            ..Default::default()
+        };
         let pixmap = hayro::render(
             page,
             cache,
             &interpreter_settings,
-            &Default::default(),
+            &render_settings,
             &pixmap_settings,
         );
 

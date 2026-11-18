@@ -14,6 +14,7 @@ pub enum DTypePolicy {
 
 /// Device and compute policy used while constructing a model.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RuntimeConfig {
     pub device: Device,
     pub dtype: DTypePolicy,

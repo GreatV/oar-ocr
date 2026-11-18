@@ -14,6 +14,7 @@ use crate::core::config::{ConfigError, ConfigValidator, OrtSessionConfig};
 ///
 /// * `C` - The task-specific configuration type (e.g., `TextDetectionConfig`)
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AdapterBuilderConfig<C> {
     /// Task-specific configuration
     pub task_config: C,

@@ -13,10 +13,9 @@ mod parser;
 pub(crate) use crate::backbones::qwen_vl_processing as processing;
 pub(crate) use crate::backbones::qwen2_vl as vision;
 
-#[allow(deprecated)]
 pub use config::{
-    MinerUConfig, MinerUImageProcessorConfig, MinerUImageSize, MinerURopeScaling, MinerUTextConfig,
-    MinerUVisionConfig, Qwen2VlVisionConfig, QwenVlImageProcessorConfig, QwenVlImageSize,
+    MinerUConfig, MinerURopeScaling, MinerUTextConfig, Qwen2VlVisionConfig,
+    QwenVlImageProcessorConfig, QwenVlImageSize,
 };
 pub use model::{GenerationTrace, MinerU};
 pub use parser::MinerUParseOptions;

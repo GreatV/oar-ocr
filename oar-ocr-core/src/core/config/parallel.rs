@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 /// scattered across different components, providing a unified way to tune parallelism
 /// behavior throughout the OCR pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ParallelPolicy {
     /// Maximum number of threads to use for parallel processing.
     /// If None, rayon will use the default thread pool size (typically number of CPU cores).
