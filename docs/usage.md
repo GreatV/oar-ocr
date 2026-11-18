@@ -1078,7 +1078,15 @@ On Windows, examples built with `--features directml` also accept `--device dire
 
 ### ONNX Runtime logging
 
-OAR defaults ONNX Runtime's global logging to Error only when it initializes the environment itself; an environment configured by the application is preserved. Explicit session logging requests lower an OAR-owned environment's threshold to the lowest requested severity; subsequent sessions do not raise it again. To see ORT warnings, call `ort::init().commit()` and set `ort::environment::Environment::current()?.set_log_level(ort::logging::LogLevel::Warning)` before constructing any OAR model.
+OAR creates one shared ONNX Runtime environment on first use and sets its log level to Error. Explicit session logging requests lower this threshold to the lowest requested severity. Applications using ort directly can call `oar_ocr::core::inference::initialize_ort_environment()?` to obtain the shared handle and pass it to `ort::session::Session::builder(&env)?`. In 0.11 the initializer returns this handle in place of the former boolean.
+
+To supply your own logger, providers, or thread pool, build a single environment with ort 2.0.0-rc.15 and install it before resolving devices or creating OAR models. OAR keeps the handle and preserves the application's logging policy.
+
+```rust
+let env = ort::init().build()?;
+env.set_log_level(ort::logging::LogLevel::Warning);
+oar_ocr::core::inference::set_ort_environment(env.clone())?;
+```
 
 ### Device-aware batching
 

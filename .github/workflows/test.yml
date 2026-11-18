@@ -90,13 +90,6 @@ jobs:
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
-      # Rust 1.100 builds into Cargo's v2 build-dir layout. ort-sys rc.13 derives
-      # the copy-dylibs destinations from OUT_DIR, which now points at these
-      # missing directories, so its build script fails on Windows. ort rc.14 fixes it.
-      - name: Create ort-sys copy-dylibs directories
-        shell: bash
-        run: mkdir -p target/debug/build/examples target/debug/build/deps
-
       - name: Run platform-specific Clippy lints
         if: matrix.vl_feature_check != ''
         run: cargo clippy --all-targets -p oar-ocr-vl ${{ matrix.vl_feature_check }} -- -D warnings

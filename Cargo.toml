@@ -18,6 +18,7 @@ oar-ocr-derive = { version = "0.10.3", path = "oar-ocr-derive", default-features
 # Shared third-party dependencies (kept in sync via workspace inheritance).
 clap = { version = "4.5.42", features = ["derive"] }
 hayro = "0.8"
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std"] }
 image = "0.25.10"
 imageproc = "0.27.0"
 rayon = "1.8"
@@ -76,7 +77,7 @@ nalgebra = "0.35"
 oar-ocr-core.workspace = true
 oar-ocr-derive.workspace = true
 # Indra OCR feeds integer and boolean tensors directly; same pin as oar-ocr-core.
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std"] }
+ort.workspace = true
 rayon.workspace = true
 regex.workspace = true
 serde.workspace = true

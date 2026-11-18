@@ -28,8 +28,8 @@ where
     F: FnOnce(SessionBuilder) -> Result<SessionBuilder, ort::Error>,
 {
     let source = model_source.into();
-    initialize_ort_environment()?;
-    let builder = Session::builder()?;
+    let environment = initialize_ort_environment()?;
+    let builder = Session::builder(&environment)?;
     let mut builder = configure_builder(builder)?;
     let session = match &source {
         ModelSource::Path(path) => builder.commit_from_file(path).map_err(|e| {
