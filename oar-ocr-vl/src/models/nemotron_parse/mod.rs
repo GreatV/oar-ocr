@@ -11,7 +11,6 @@ use crate::{
     AnyPageParserOptions, Error, PageDocument, PageParser,
     runtime::{
         checkpoint::{collect_safetensors, load_json_config},
-        device::select_dtype,
         sampling::{RepetitionHistory, apply_unique_repetition_penalty, argmax_token},
     },
 };
@@ -112,11 +111,8 @@ impl NemotronParse {
     /// Load the visual encoder, tied decoder and tokenizer from a local checkpoint directory.
     pub fn from_dir(dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         let dir = dir.as_ref();
-        let dtype = if device.is_cpu() {
-            DType::F32
-        } else {
-            select_dtype(&device)
-        };
+        // The checkpoints are f32, and bf16 greedy decoding diverges from the reference on long pages.
+        let dtype = DType::F32;
         let model_config: ModelConfig =
             load_json_config(dir.join("config.json"), "Nemotron Parse", "config.json")?;
         if !model_config.legacy_causal_vision_prefix {
