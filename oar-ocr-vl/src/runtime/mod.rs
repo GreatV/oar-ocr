@@ -16,3 +16,5 @@ pub(crate) mod cuda;
 pub(crate) mod layers;
 
 pub(crate) mod resampling;
+
+pub(crate) mod sampling;

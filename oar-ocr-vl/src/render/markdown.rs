@@ -1,4 +1,5 @@
 //! Markdown rendering for the standalone VL document model.
+pub(crate) mod native_chart;
 
 use crate::document::structure::{LayoutElement, LayoutElementType};
 use once_cell::sync::Lazy;

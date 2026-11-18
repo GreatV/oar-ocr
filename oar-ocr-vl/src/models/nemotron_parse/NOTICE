@@ -1,0 +1,6 @@
+Nemotron-3.5-Parse and OpenThai2.0-OCR-Markdown
+
+The native model and prediction postprocessing adapt the OpenMDW Nemotron Parse export.
+Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+OpenThai2.0-OCR-Markdown is a Thai fine-tune by iApp Technology.
+The accompanying LICENSE contains the OpenMDW-1.1 terms.

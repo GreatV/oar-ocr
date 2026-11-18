@@ -206,6 +206,8 @@ The [`oar-ocr-vl`](oar-ocr-vl/README.md) crate provides native [Candle](https://
 | [MiniCPM-OCR 1.0](https://huggingface.co/openbmb/MiniCPM-OCR-1.0) | 1.3B | PP-DocLayout page parsing and text, formula, OTSL table, chart, and seal recognition (SigLIP + Qwen3.5) |
 | [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) | 0.7B | Higher-capacity ViT-B variant with the same parsing and recognition tasks |
 | [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) | 0.6B | Two-stage page parsing, dewarp, layout, text, formula, and OTSL-table recognition |
+| [Nemotron-3.5-Parse](https://huggingface.co/nvidia/Nemotron-3.5-Parse) | 0.63B | Visual-prefix document parsing with content-normalized boxes |
+| [OpenThai2.0-OCR-Markdown](https://huggingface.co/iapp/OpenThai2.0-OCR-Markdown) | 0.63B | Printed Thai and English pages with ordered blocks, Markdown and HTML tables |
 | [OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) | 0.8B | Model-native full-page document-to-Markdown parsing |
 | [OvisOCR3](https://huggingface.co/ATH-MaaS/OvisOCR3) | 0.8B | Model-native Markdown or structured page parsing, text, formula, HTML table, and chart recognition |
 | [OXR-1.0](https://huggingface.co/SoMarkAI/OXR-1.0) | 1.4B | PP-DocLayout page parsing and text, formula, HTML table, code, and chemical-structure recognition |

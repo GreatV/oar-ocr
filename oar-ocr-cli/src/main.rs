@@ -38,6 +38,8 @@ const PARSERS: &[AnyPageParserModel] = &[
     AnyPageParserModel::MiniCpmOcr,
     AnyPageParserModel::MonkeyOcrV2S,
     AnyPageParserModel::MonkeyOcrV2B,
+    AnyPageParserModel::Nemotron35Parse,
+    AnyPageParserModel::OpenThaiMarkdown,
     AnyPageParserModel::OvisOcr2,
     AnyPageParserModel::OvisOcr3,
     AnyPageParserModel::Oxr,
@@ -560,11 +562,13 @@ fn load_parser(args: &args::Parse, device: &str) -> Result<AnyPageParser> {
     #[cfg(feature = "auto-download")]
     {
         use oar_ocr_vl::{AnyPageParserPretrainedOptions, DownloadSource};
-        let source = match args.source {
-            args::Source::Modelscope => DownloadSource::ModelScope,
-            args::Source::Huggingface => DownloadSource::HuggingFace,
-        };
-        let mut options = AnyPageParserPretrainedOptions::default().with_source(source);
+        let mut options = AnyPageParserPretrainedOptions::default();
+        if let Some(source) = args.source {
+            options = options.with_source(match source {
+                args::Source::Modelscope => DownloadSource::ModelScope,
+                args::Source::Huggingface => DownloadSource::HuggingFace,
+            });
+        }
         if let Some(layout) = &args.layout_dir {
             options = options.with_layout_dir(layout);
         }

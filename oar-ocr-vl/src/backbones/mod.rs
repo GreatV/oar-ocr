@@ -13,3 +13,4 @@ pub(crate) mod sdar;
 pub(crate) mod swin_v2;
 
 pub(crate) mod u2net;
+pub(crate) mod vit;

@@ -93,6 +93,8 @@ pub mod mineru_diffusion;
 pub mod minicpm_ocr;
 #[path = "models/monkeyocrv2/mod.rs"]
 pub mod monkeyocrv2;
+#[path = "models/nemotron_parse/mod.rs"]
+pub mod nemotron_parse;
 #[path = "models/ovisocr2/mod.rs"]
 pub mod ovisocr2;
 #[path = "models/ovisocr3/mod.rs"]

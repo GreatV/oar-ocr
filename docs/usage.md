@@ -1121,3 +1121,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 Use `predict` for ordinary `OAROCRResult` pages. Use `predict_with_rows` to get the row IDs needed to join neighboring cells with spaces and distinct rows with newlines. With automatic model downloads enabled, use `OAROCRBuilder::openthai()` to resolve the registered filenames. [Model files](models.md#openthai-text)
+
+## OpenThai Markdown and Nemotron Parse
+
+Run single-pass document parsing with the checkpoint's repository ID. Each result contains the generated token stream, ordered blocks with content-normalized boxes, rendered Markdown and table conversion diagnostics. Native tables render as HTML so merged cells retain their row and column spans.
+
+```bash
+oar parse --model iapp/OpenThai2.0-OCR-Markdown --model-dir checkpoints/openthai page.png
+oar parse --model nvidia/Nemotron-3.5-Parse --model-dir checkpoints/nemotron page.png
+```
+
+Use `--source huggingface` with a model ID to resolve a snapshot. CUDA uses bf16 on supported devices. Choose `--device cpu` for f32 inference. Both checkpoints produce layout and content in a single decoding pass.

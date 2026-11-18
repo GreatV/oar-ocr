@@ -255,3 +255,7 @@ Note: the resolver compares paths verbatim — `~` is not expanded. Pass a bare 
 - Files land at `$OAR_HOME/<name>`, flat (no per-revision subdirectories).
 - Downloads stream into a unique `$OAR_HOME/.<name>.<pid>.<n>.part` and are renamed atomically once the SHA-256 matches, so a crash mid-download won't poison the cache and concurrent processes don't clobber each other.
 - After verification a `$OAR_HOME/.<name>.sha256` sidecar records the verified hash. Future loads with a matching cache file + sidecar skip the multi-second rehash. Deleting the sidecar forces a fresh hash check.
+
+### OpenThai2.0-OCR-Markdown and Nemotron-3.5-Parse
+
+The VL parser accepts the explicit IDs `iapp/OpenThai2.0-OCR-Markdown` and `nvidia/Nemotron-3.5-Parse`. The default download uses the linked Hugging Face revisions. Each snapshot contains the encoder and decoder in `model.safetensors`, the tokenizer in `tokenizer.json` and the decoding defaults in `generation_config.json`. Both models use the OpenMDW-1.1 license and provide a separate MIT tokenizer attribution. [OpenThai checkpoint](https://huggingface.co/iapp/OpenThai2.0-OCR-Markdown/tree/b6d9c95c9542de44ab03744d56b841ed212035e3) · [NVIDIA checkpoint](https://huggingface.co/nvidia/Nemotron-3.5-Parse/tree/ea2e1fe486bea3e7d0d505df9bafa4ad562407a0)

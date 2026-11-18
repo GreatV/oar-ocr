@@ -241,6 +241,46 @@ pub fn clean_truncated_repeats(text: &str) -> String {
     )
 }
 
+/// Normalize printed prose and model-generated list bullets while preserving literal code and formulas.
+pub(crate) fn normalize_printed_text(class: &str, text: &str) -> String {
+    let mut value = String::new();
+    let prose = matches!(
+        class,
+        "Text"
+            | "List-item"
+            | "Caption"
+            | "Section-header"
+            | "Page-header"
+            | "Page-footer"
+            | "Footnote"
+            | "Title"
+    );
+    if prose && !["`", "$", r"\(", r"\["].iter().any(|v| text.contains(v)) {
+        let mut prev = None;
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '\u{ad}'
+                || !(prev.is_some_and(char::is_alphabetic)
+                    && chars.peek().is_some_and(|c| c.is_alphabetic()))
+            {
+                value.push(ch);
+            }
+            prev = Some(ch);
+        }
+    } else {
+        value.push_str(text);
+    }
+    if class == "List-item" {
+        let trimmed = value.trim_start_matches([' ', '\t']);
+        if let Some(rest) = trimmed.strip_prefix(['•', '◦', '▪', '●', '‣', '⁃', '–', '—'])
+            && rest.starts_with([' ', '\t'])
+        {
+            return format!("- {}", rest.trim_start_matches([' ', '\t']));
+        }
+    }
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::repetition::find_shortest_repeating_substring;
