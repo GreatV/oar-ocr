@@ -142,6 +142,10 @@ impl PageDocument {
         use crate::document::structure::LayoutElementType;
         let scale_x = width.max(1) as f32;
         let scale_y = height.max(1) as f32;
+        let mut source_boxes = self
+            .raw_output
+            .as_deref()
+            .and_then(crate::nemotron_parse::source_boxes);
         let blocks = self
             .blocks
             .iter()
@@ -158,14 +162,25 @@ impl PageDocument {
                 } else {
                     mapped.as_str()
                 };
+                let source = source_boxes.as_mut().and_then(Iterator::next);
+                let bbox = if let Some((label, coords)) = source
+                    && label == block.block_type
+                    && coords.map(|v| v as f32) == block.bbox
+                {
+                    let [x1, y1, x2, y2] = coords.map(|v| v.clamp(0., 1.));
+                    [
+                        x1.min(x2) * f64::from(width),
+                        y1.min(y2) * f64::from(height),
+                        x1.max(x2) * f64::from(width),
+                        y1.max(y2) * f64::from(height),
+                    ]
+                } else {
+                    let [x1, y1, x2, y2] = block.bbox;
+                    [x1 * scale_x, y1 * scale_y, x2 * scale_x, y2 * scale_y].map(f64::from)
+                };
                 let mut value = serde_json::json!({
                     "type": canonical,
-                    "bbox": [
-                        block.bbox[0] * scale_x,
-                        block.bbox[1] * scale_y,
-                        block.bbox[2] * scale_x,
-                        block.bbox[3] * scale_y,
-                    ],
+                    "bbox": bbox,
                     "order": position as u32 + 1,
                     "confidence": null,
                     "angle": block.angle,

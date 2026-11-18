@@ -266,7 +266,7 @@ Boxes are in the upright page: `page.rotation` is the quarter turn that was undo
 
 Examples default to `--device auto` (case-insensitive). Classic pipelines try compiled CUDA(0), CoreML on Apple platforms, and DirectML(0) on Windows, then CPU. Library callers opt in with `OrtSessionConfig::auto()`; existing defaults remain CPU, and `resolve_auto()` explicitly queries the resolved configuration. Failed registrations are omitted during construction, before choosing CPU batch defaults. TensorRT, OpenVINO, and WebGPU remain explicit choices because of initialization cost and compatibility. When CUDA is compiled but no GPU is available, ONNX Runtime prints an ERROR log during probing: `CUDA failure 100: no CUDA-capable device is detected`. This is expected; execution then falls back to CPU.
 
-VL tries compiled CUDA(0), then Metal(0), then CPU. Use `oar_ocr_vl::auto_device()` or `oar_ocr_vl::utils::parse_device("auto")` in library code. Device creation failures fall back automatically; the existing dtype probe selects F32 on CPU and on accelerators without BF16 support, BF16 when the device supports it and a BF16 probe succeeds, or F16 when that probe fails. Use `--device cpu` to require CPU execution in either pipeline.
+VL tries compiled CUDA(0), then Metal(0), then CPU. Use `oar_ocr_vl::auto_device()` or `oar_ocr_vl::utils::parse_device("auto")` in library code. Device creation failures fall back automatically. For models that use automatic dtype selection, the probe selects F32 on CPU and on accelerators without BF16 support, BF16 when the device supports it and a BF16 probe succeeds, or F16 when that probe fails. Use `--device cpu` to require CPU execution in either pipeline.
 
 ### CUDA
 
@@ -1121,3 +1121,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 Use `predict` for ordinary `OAROCRResult` pages. Use `predict_with_rows` to get the row IDs needed to join neighboring cells with spaces and distinct rows with newlines. With automatic model downloads enabled, use `OAROCRBuilder::openthai()` to resolve the registered filenames. [Model files](models.md#openthai-text)
+
+## OpenThai Markdown and Nemotron Parse
+
+Run single-pass document parsing with the checkpoint's repository ID. Each result contains the generated token stream, ordered blocks with content-normalized boxes, rendered Markdown and table conversion diagnostics. Native tables render as HTML so merged cells retain their row and column spans.
+
+```bash
+oar parse --model iapp/OpenThai2.0-OCR-Markdown --model-dir checkpoints/openthai page.png
+oar parse --model nvidia/Nemotron-3.5-Parse --model-dir checkpoints/nemotron page.png
+```
+
+Use `--source huggingface` with a model ID to resolve a snapshot. Both checkpoints use f32 on every device, including CUDA, and produce layout and content in a single decoding pass.

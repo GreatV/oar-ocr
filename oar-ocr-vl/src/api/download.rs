@@ -170,10 +170,9 @@ pub struct AnyPageParserPretrainedOptions {
     pub glm: crate::GlmOcrLoadOptions,
     /// Jina OCR load options.
     pub jina: crate::jina_ocr::JinaOcrLoadOptions,
-    /// Checkpoint source. `None` means ModelScope.
+    /// Checkpoint source. OpenThai Markdown and Nemotron Parse default to Hugging Face, and other models default to ModelScope.
     pub source: Option<DownloadSource>,
-    /// Revision to pin. `None` means the source's default (`master` on
-    /// ModelScope, `main` on Hugging Face).
+    /// Override the model revision. The two Nemotron Parse family checkpoints pin their Hugging Face release commits by default.
     pub revision: Option<String>,
     /// Layout checkpoint repo downloaded for layout-composed models. `None`
     /// means [`DEFAULT_LAYOUT_REPO`].
@@ -467,9 +466,26 @@ pub(crate) fn snapshot(
     repo: &str,
     revision: Option<&str>,
 ) -> Result<PathBuf, Error> {
+    snapshot_with_files(source, repo, revision, &[])
+}
+
+/// Publish the model's inference assets in a separate cache directory. A complete
+/// snapshot of the pinned commit can satisfy the same request.
+pub(crate) fn snapshot_with_files(
+    source: DownloadSource,
+    repo: &str,
+    revision: Option<&str>,
+    required: &[&str],
+) -> Result<PathBuf, Error> {
     let (source, remote) = resolve_remote(source, repo);
     let revision = revision.unwrap_or_else(|| source.default_revision());
-    let base = snapshot_base(&cache_root(), repo)?;
+    let mut base = snapshot_base(&cache_root(), repo)?;
+    if !required.is_empty() {
+        if validate_commit(revision).is_ok() && base.join(revision).is_dir() {
+            return Ok(base.join(revision));
+        }
+        base = base.join("inference");
+    }
     fs::create_dir_all(&base).map_err(|error| {
         Error::Io(io::Error::new(
             error.kind(),
@@ -539,7 +555,17 @@ pub(crate) fn snapshot(
         ))
     })?;
 
-    let files = list_files(&agent, source, &remote, &commit)?;
+    let mut files = list_files(&agent, source, &remote, &commit)?;
+    if !required.is_empty() {
+        files.retain(|file| required.contains(&file.path.as_str()));
+        for &name in required {
+            if !files.iter().any(|file| file.path == name) {
+                return Err(Error::config(format!(
+                    "{repo} at {commit} is missing {name}"
+                )));
+            }
+        }
+    }
     for file in &files {
         ensure_file(&agent, source, &remote, &commit, &staging, file)?;
     }

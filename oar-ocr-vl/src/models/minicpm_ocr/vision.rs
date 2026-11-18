@@ -7,10 +7,7 @@ use super::config::MiniCpmOcrVisionConfig;
 use super::infer;
 use super::processing::{MERGE_SIZE, MiniCpmOcrSlice};
 use crate::Error;
-use crate::runtime::attention::{
-    ATTENTION_CHUNK_SCRATCH_BUDGET, attention_query_chunk, chunked_vision_attention,
-    flash_attention,
-};
+use crate::runtime::attention::global_vision_attention;
 use candle_core::{D, Tensor};
 use candle_nn::{Embedding, LayerNorm, Linear, Module, VarBuilder, embedding, layer_norm, linear};
 use std::collections::BTreeMap;
@@ -53,19 +50,7 @@ impl Attention {
             to_heads(&self.key)?,
             to_heads(&self.value)?,
         );
-        let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let context = match flash_attention(&query, &key, &value, scale, false).map_err(infer)? {
-            Some(context) => context,
-            None => {
-                let chunk = attention_query_chunk(
-                    batch * self.heads,
-                    length,
-                    ATTENTION_CHUNK_SCRATCH_BUDGET,
-                )
-                .min(256);
-                chunked_vision_attention(&query, &key, &value, scale, chunk).map_err(infer)?
-            }
-        };
+        let context = global_vision_attention(&query, &key, &value).map_err(infer)?;
         let context = context
             .transpose(1, 2)
             .and_then(|x| x.reshape((batch, length, self.heads * self.head_dim)))
@@ -105,15 +90,14 @@ impl EncoderLayer {
     fn forward(&self, input: &Tensor) -> Result<Tensor, Error> {
         let normed = self.layer_norm1.forward(input).map_err(infer)?;
         let hidden = (input + self.attention.forward(&normed)?).map_err(infer)?;
-        let update = self
-            .layer_norm2
-            .forward(&hidden)
-            .and_then(|x| self.fc1.forward(&x))
-            // gelu_pytorch_tanh
-            .and_then(|x| x.gelu())
-            .and_then(|x| self.fc2.forward(&x))
-            .map_err(infer)?;
-        (hidden + update).map_err(infer)
+        crate::backbones::vit::mlp_residual(
+            &hidden,
+            &self.layer_norm2,
+            &self.fc1,
+            candle_nn::Activation::GeluPytorchTanh,
+            &self.fc2,
+        )
+        .map_err(infer)
     }
 }
 

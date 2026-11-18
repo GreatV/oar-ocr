@@ -181,8 +181,9 @@ pub(crate) struct Parse {
     /// Load PP-DocLayout from a local directory for layout-composed models
     #[arg(long, value_name = "DIR")]
     pub(crate) layout_dir: Option<PathBuf>,
-    #[arg(long, value_enum, default_value = "modelscope")]
-    pub(crate) source: Source,
+    /// Override the model's default download source.
+    #[arg(long, value_enum)]
+    pub(crate) source: Option<Source>,
     /// Maximum generated tokens per page or region
     #[arg(long, value_parser = positive)]
     pub(crate) max_tokens: Option<usize>,

@@ -10,6 +10,7 @@ use crate::error::Error;
 use crate::runtime::cuda::{ArgmaxFirstBf16, ArgmaxFirstF32, MaskTokenIds};
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::CudaGraphDrainGuard;
+use crate::runtime::sampling::{apply_repetition_penalty, argmax_token};
 pub use crate::runtime::trace::GenerationTrace;
 use crate::runtime::trace::top3;
 use crate::structure::LayoutElementType;
@@ -901,43 +902,6 @@ fn apply_sampling_processors(logits: &mut [f32], history: &[u32], params: &Sampl
 
     apply_top_k(logits, params.top_k);
     apply_top_p(logits, params.top_p);
-}
-
-fn argmax_token(logits: &[f32]) -> u32 {
-    let mut best_idx = 0usize;
-    let mut best_val = f32::NEG_INFINITY;
-    for (idx, &val) in logits.iter().enumerate() {
-        if val.is_nan() {
-            continue;
-        }
-        if val > best_val {
-            best_val = val;
-            best_idx = idx;
-        }
-    }
-    best_idx as u32
-}
-
-fn apply_repetition_penalty(logits: &mut [f32], history: &[u32], penalty: f32) {
-    if penalty <= 1.0 {
-        return;
-    }
-    let mut seen = HashSet::new();
-    for &token in history {
-        if !seen.insert(token) {
-            continue;
-        }
-        let idx = token as usize;
-        if idx >= logits.len() {
-            continue;
-        }
-        let val = logits[idx];
-        logits[idx] = if val < 0.0 {
-            val * penalty
-        } else {
-            val / penalty
-        };
-    }
 }
 
 fn apply_top_k(logits: &mut [f32], top_k: usize) {

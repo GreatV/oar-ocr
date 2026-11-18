@@ -73,3 +73,5 @@ Without `--model-dir`, Indra downloads `datalab-to/indra-ocr` at the pinned, par
 `--batch-size N` overrides the per-replica default of max(8, 4 × workers); batches smaller than the worker count can leave workers idle. Markdown is the default output, `--format text` joins lines in reading order, and `--format json` emits the shared page schema with `pipeline: "indra"`. Non-JSON files use the same `.md` extension as the other commands. Boxes and dimensions refer to the upright page.
 
 `--keep-furniture` retains headers and footers in Markdown. `--table-heads` enables the optional reading-order table heads. `--math` reads math lines as inline LaTeX and additionally requires `math_meta.json`, `mathcls.onnx`, `math_enc.onnx`, `math_dec_init.onnx`, and `math_dec_step.onnx`. PDFs use the shared rasterizer, page selection, and DPI options.
+
+Use `oar parse --model iapp/OpenThai2.0-OCR-Markdown page.png` for the Thai fine-tune or `oar parse --model nvidia/Nemotron-3.5-Parse page.png` for the base checkpoint. Both return page Markdown with HTML tables. Add `--model-dir DIR` to use local weights.

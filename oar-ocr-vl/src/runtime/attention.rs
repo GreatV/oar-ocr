@@ -288,6 +288,25 @@ pub(crate) fn chunked_vision_attention(
     Tensor::cat(&chunks, 2)
 }
 
+/// Full bidirectional attention for a ViT page. Bound the eager score scratch by chunking queries.
+pub(crate) fn global_vision_attention(
+    query: &Tensor,
+    key: &Tensor,
+    value: &Tensor,
+) -> Result<Tensor> {
+    let (batch, heads, length, head_dim) = query.dims4()?;
+    let scale = 1.0 / (head_dim as f64).sqrt();
+    match flash_attention(query, key, value, scale, false)? {
+        Some(context) => Ok(context),
+        None => {
+            let chunk =
+                attention_query_chunk(batch * heads, length, ATTENTION_CHUNK_SCRATCH_BUDGET)
+                    .min(256);
+            chunked_vision_attention(query, key, value, scale, chunk)
+        }
+    }
+}
+
 /// Scaled dot-product attention for grouped-query attention without expanding
 /// K/V heads. Query heads that share one KV head are folded into the matrix row
 /// dimension, preserving the usual head order in the returned tensor.
