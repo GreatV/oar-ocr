@@ -84,6 +84,7 @@ pub struct GenerationTrace {
 /// Load-time options for [`JinaOcr`], builder-style like
 /// [`crate::RuntimeConfig`].
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct JinaOcrLoadOptions {
     /// Load the trained FastMTP draft head for speculative decoding
     /// (default: off). Greedy verification keeps the output token-identical

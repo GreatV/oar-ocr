@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "Command-line OCR and document parsing with automatic model downloads"
 readme = "README.md"
 keywords = ["ocr", "cli", "document", "computer-vision"]

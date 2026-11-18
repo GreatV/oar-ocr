@@ -170,8 +170,6 @@ pub use layout::{
     LayoutPostprocessOptions, LayoutPrediction, LayoutShapeMode, LayoutSource, ScoreComparison,
     StaticLayout,
 };
-#[allow(deprecated)]
-pub use pipeline::page_parser::LayoutFirstPageParser;
 pub use pipeline::page_parser::{LayoutPageParser, LayoutPageParserOptions};
 pub use pipeline::page_preprocessing::PagePreprocessor;
 pub use pp_doclayout::{PpDocLayout, PpDocLayoutVersion};

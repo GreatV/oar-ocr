@@ -48,6 +48,16 @@ pub struct OAROCRResult {
     pub rectified_img: Option<Arc<RgbImage>>,
 }
 
+/// An OCR page and its row assignments in reading order.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct OAROCRPageWithRows {
+    /// The recognized page.
+    pub page: OAROCRResult,
+    /// One row ID per text region, used by [`OAROCRResult::text_by_rows`].
+    pub row_ids: Vec<usize>,
+}
+
 impl OAROCRResult {
     /// Returns an iterator over text regions that have recognized text.
     pub fn recognized_text_regions(&self) -> impl Iterator<Item = &TextRegion> {

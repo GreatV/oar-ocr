@@ -1121,8 +1121,8 @@ use oar_ocr::{oarocr::OAROCRBuilder, utils::load_image};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reader = OAROCRBuilder::openthai_from_dir("checkpoints/OpenThai2.0-OCR-Text").build()?;
-    for (page, rows) in reader.predict_with_rows(vec![load_image("thai-page.png")?])? {
-        println!("{}", page.text_by_rows(&rows)?);
+    for prediction in reader.predict_with_rows(vec![load_image("thai-page.png")?])? {
+        println!("{}", prediction.page.text_by_rows(&prediction.row_ids)?);
     }
     Ok(())
 }

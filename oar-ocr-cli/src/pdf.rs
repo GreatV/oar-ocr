@@ -130,11 +130,17 @@ impl Input {
         };
         // A per-page cache releases decoded images before rendering the next page.
         let cache = RenderCache::new();
+        // Match the unhinted glyph outlines rendered by hayro 0.8.
+        let render_settings = hayro::RenderSettings {
+            hinting: false,
+            glyph_caching: false,
+            ..Default::default()
+        };
         let pixmap = hayro::render(
             page,
             &cache,
             &Default::default(),
-            &Default::default(),
+            &render_settings,
             &pixmap_settings,
         );
         let data = pixmap

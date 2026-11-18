@@ -9,7 +9,6 @@ rust-version = "1.95"
 license = "Apache-2.0"
 authors = ["Wang Xin <xinwang614@gmail.com>"]
 repository = "https://github.com/greatv/oar-ocr"
-homepage = "https://github.com/greatv/oar-ocr"
 
 [workspace.dependencies]
 oar-ocr-core = { version = "0.10.3", path = "oar-ocr-core", default-features = false }
@@ -17,7 +16,7 @@ oar-ocr-derive = { version = "0.10.3", path = "oar-ocr-derive", default-features
 
 # Shared third-party dependencies (kept in sync via workspace inheritance).
 clap = { version = "4.5.42", features = ["derive"] }
-hayro = "0.8"
+hayro = "0.9"
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std"] }
 image = "0.25.10"
 imageproc = "0.27.0"
@@ -38,7 +37,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "An Optical Character Recognition (OCR) and Document Layout Analysis library written in Rust."
 readme = "README.md"
 keywords = [
@@ -88,7 +86,7 @@ tracing.workspace = true
 unicode-bidi = "0.3.18"
 unicode-normalization = "0.1.25"
 unicode-properties = { version = "0.1.4", default-features = false, features = ["general-category"] }
-zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.5", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 ab_glyph = "0.2"

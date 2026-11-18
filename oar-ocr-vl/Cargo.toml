@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "Vision-Language models for oar-ocr"
 readme = "README.md"
 keywords = [
@@ -29,7 +28,6 @@ cuda = [
     "candle-core/cuda",
     "dep:candle-flash-attn",
     "candle-nn/cuda",
-    "candle-transformers/cuda",
 ]
 # When enabled, turns on Candle's Metal backend for GPU acceleration on Apple devices.
 # Cargo features cannot be target-scoped directly, so Linux `--all-features`
@@ -37,14 +35,12 @@ cuda = [
 metal = [
     "candle-core/metal",
     "candle-nn/metal",
-    "candle-transformers/metal",
 ]
 
 [dependencies]
 candle-core = "0.11.0"
 candle-flash-attn = { version = "0.11.0", optional = true }
 candle-nn = "0.11.0"
-candle-transformers = "0.11.0"
 # Same download stack as oar-ocr-core's auto-download, so the workspace
 # gains no new dependency versions.
 dirs = { version = "7.0", optional = true }

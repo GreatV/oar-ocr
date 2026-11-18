@@ -165,7 +165,7 @@ pub use oar_ocr_derive::{ConfigValidator, TaskPredictorBuilder};
 pub mod prelude {
     // High-level builder APIs
     pub use crate::oarocr::{
-        EdgeProcessorConfig, OAROCR, OAROCRBuilder, OAROCRResult, OARStructure,
+        EdgeProcessorConfig, OAROCR, OAROCRBuilder, OAROCRPageWithRows, OAROCRResult, OARStructure,
         OARStructureBuilder, PpOcrV6Size, TextRegion,
     };
 

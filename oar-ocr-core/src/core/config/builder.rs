@@ -10,6 +10,7 @@ use std::path::PathBuf;
 /// This struct provides configuration options for building ONNX inference engines,
 /// including runtime settings and model metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ModelInferenceConfig {
     /// The path to the model file (optional).
     pub model_path: Option<PathBuf>,

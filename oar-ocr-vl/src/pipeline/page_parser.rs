@@ -184,50 +184,6 @@ impl<L: LayoutSource, B: RecognitionBackend> PageParser for LayoutPageParser<L, 
     }
 }
 
-/// Backwards-compatible borrowed adapter with unit per-page options.
-///
-/// Use [`LayoutPageParser`] to own the components or override settings per page.
-#[deprecated(since = "0.10.1", note = "use LayoutPageParser")]
-pub struct LayoutFirstPageParser<'a, L: LayoutSource + ?Sized, B: RecognitionBackend + ?Sized> {
-    inner: LayoutPageParser<&'a L, &'a B>,
-}
-
-#[allow(deprecated)]
-impl<'a, L: LayoutSource + ?Sized, B: RecognitionBackend + ?Sized> LayoutFirstPageParser<'a, L, B> {
-    pub fn new(layout: &'a L, backend: &'a B) -> Self {
-        Self {
-            inner: LayoutPageParser::new(layout, backend),
-        }
-    }
-
-    pub fn with_config(layout: &'a L, backend: &'a B, config: DocParserConfig) -> Self {
-        Self {
-            inner: LayoutPageParser::with_config(layout, backend, config),
-        }
-    }
-
-    pub fn with_region_batch_size(mut self, size: usize) -> Self {
-        self.inner = self.inner.with_region_batch_size(size);
-        self
-    }
-}
-
-#[allow(deprecated)]
-impl<L: LayoutSource + ?Sized, B: RecognitionBackend + ?Sized> PageParser
-    for LayoutFirstPageParser<'_, L, B>
-{
-    type Options = ();
-
-    fn parse_page(
-        &self,
-        image: &RgbImage,
-        _options: &Self::Options,
-    ) -> Result<PageDocument, Error> {
-        self.inner
-            .parse_page(image, &LayoutPageParserOptions::default())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,12 +602,13 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn empty_layout_falls_back_to_full_image_and_borrowed_adapter_still_works() {
+    fn empty_layout_respects_full_image_and_empty_policies() {
         let layout = MockLayout::default();
         let backend = MockBackend::default();
-        let parser = LayoutFirstPageParser::new(&layout, &backend);
-        let page = parser.parse_page(&RgbImage::new(100, 100), &()).unwrap();
+        let parser = LayoutPageParser::new(&layout, &backend);
+        let page = parser
+            .parse_page(&RgbImage::new(100, 100), &Default::default())
+            .unwrap();
         assert_eq!(page.blocks[0].bbox, [0.0, 0.0, 1.0, 1.0]);
         assert_eq!(page.blocks[0].content.as_deref(), Some("whole page"));
         assert_eq!(backend.full_image_calls.get(), 1);

@@ -210,11 +210,12 @@ fn run(cli: Cli) -> Result<()> {
                             .into_iter()
                             .zip(pages.iter().map(|(input, number)| (&**input, *number)))
                             .enumerate()
-                            .map(|(offset, ((mut page, rows), (input, _)))| {
+                            .map(|(offset, (prediction, (input, _)))| {
+                                let mut page = prediction.page;
                                 page.input_path = input.path.to_string_lossy().into_owned().into();
                                 page.index = first_index + offset;
                                 Ok(Document {
-                                    text: page.text_by_rows(&rows)?,
+                                    text: page.text_by_rows(&prediction.row_ids)?,
                                     json: serde_json::to_value(page)?,
                                 })
                             })
@@ -237,11 +238,12 @@ fn run(cli: Cli) -> Result<()> {
                         .into_iter()
                         .zip(pages)
                         .enumerate()
-                        .map(|(offset, ((mut page, rows), (input, _)))| {
+                        .map(|(offset, (prediction, (input, _)))| {
+                            let mut page = prediction.page;
                             page.input_path = input.path.to_string_lossy().into_owned().into();
                             page.index = first_index + offset;
                             Ok(Document {
-                                text: page.text_by_rows(&rows)?,
+                                text: page.text_by_rows(&prediction.row_ids)?,
                                 json: serde_json::to_value(page)?,
                             })
                         })

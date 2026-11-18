@@ -58,6 +58,7 @@ impl Default for PaddingStrategy {
 
 /// Configuration for dynamic batching
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DynamicBatchConfig {
     /// Maximum batch size for detection
     pub max_detection_batch_size: usize,
