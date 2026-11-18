@@ -214,3 +214,22 @@ impl_adapter_builder! {
         })
     },
 }
+
+impl TextRecognitionAdapter {
+    /// Recognize line crops with the selected pixel normalization and CTC run policy.
+    pub fn read_lines(
+        &self,
+        crops: &[impl std::borrow::Borrow<image::RgbImage>],
+        preprocessing: crate::models::recognition::crnn::RecognitionPreprocessing,
+        decoding: crate::models::recognition::crnn::CtcDecoding,
+        batch_size: usize,
+    ) -> Result<Vec<crate::processors::CtcReading>, OCRError> {
+        self.model.read_lines(
+            crops,
+            preprocessing,
+            decoding,
+            batch_size,
+            self.return_word_box,
+        )
+    }
+}

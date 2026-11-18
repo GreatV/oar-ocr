@@ -170,6 +170,10 @@ fn run(cli: Cli) -> Result<()> {
             let build = |device: &str| -> Result<_> {
                 let builder = match (&args.models.det, &args.models.rec, &args.models.dict) {
                     (Some(det), Some(rec), Some(dict)) => OAROCRBuilder::new(det, rec, dict),
+                    (None, None, None) if args.preset.is_some() => match &args.model_dir {
+                        Some(dir) => OAROCRBuilder::openthai_from_dir(dir),
+                        None => OAROCRBuilder::openthai(),
+                    },
                     (None, None, None) => OAROCRBuilder::pp_ocrv6(args.size.into()),
                     _ => bail!("custom OCR models require --det, --rec, and --dict together"),
                 };
@@ -200,15 +204,15 @@ fn run(cli: Cli) -> Result<()> {
                      first_index: usize|
                      -> Result<Vec<Document>> {
                         model
-                            .predict(images)?
+                            .predict_with_rows(images)?
                             .into_iter()
                             .zip(pages.iter().map(|(input, number)| (&**input, *number)))
                             .enumerate()
-                            .map(|(offset, (mut page, (input, _)))| {
+                            .map(|(offset, ((mut page, rows), (input, _)))| {
                                 page.input_path = input.path.to_string_lossy().into_owned().into();
                                 page.index = first_index + offset;
                                 Ok(Document {
-                                    text: page.concatenated_text("\n"),
+                                    text: page.text_by_rows(&rows)?,
                                     json: serde_json::to_value(page)?,
                                 })
                             })
@@ -227,15 +231,15 @@ fn run(cli: Cli) -> Result<()> {
                 false,
                 |images, pages, first_index| {
                     model
-                        .predict(images)?
+                        .predict_with_rows(images)?
                         .into_iter()
                         .zip(pages)
                         .enumerate()
-                        .map(|(offset, (mut page, (input, _)))| {
+                        .map(|(offset, ((mut page, rows), (input, _)))| {
                             page.input_path = input.path.to_string_lossy().into_owned().into();
                             page.index = first_index + offset;
                             Ok(Document {
-                                text: page.concatenated_text("\n"),
+                                text: page.text_by_rows(&rows)?,
                                 json: serde_json::to_value(page)?,
                             })
                         })

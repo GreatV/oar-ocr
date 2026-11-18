@@ -102,7 +102,7 @@ fn rows(boxes: &[[f32; 4]]) -> Vec<Vec<usize>> {
     rows
 }
 
-fn median_f64(values: &mut [f64]) -> f64 {
+pub(crate) fn median_f64(values: &mut [f64]) -> f64 {
     values.sort_by(f64::total_cmp);
     let n = values.len();
     if n % 2 == 1 {

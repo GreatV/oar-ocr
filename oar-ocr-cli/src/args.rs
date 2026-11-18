@@ -82,6 +82,12 @@ pub(crate) enum PageFormat {
 
 #[derive(Args)]
 pub(crate) struct Ocr {
+    /// Select the printed Thai and English recognition pipeline
+    #[arg(long,value_enum,conflicts_with_all=["size","det","rec","dict"])]
+    pub(crate) preset: Option<OcrPreset>,
+    /// Load the preset files using upstream names from this directory
+    #[arg(long, requires = "preset", value_name = "DIR")]
+    pub(crate) model_dir: Option<PathBuf>,
     /// PP-OCRv6 preset size
     #[arg(long, value_enum, default_value = "tiny", conflicts_with_all = ["det", "rec", "dict"])]
     pub(crate) size: OcrSize,
@@ -91,6 +97,11 @@ pub(crate) struct Ocr {
     pub(crate) format: OcrFormat,
     #[arg(required = true, value_name = "INPUTS", num_args = 1..)]
     pub(crate) images: Vec<PathBuf>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum OcrPreset {
+    Openthai,
 }
 
 #[derive(Clone, Copy, ValueEnum)]

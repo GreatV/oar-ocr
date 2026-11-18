@@ -1,6 +1,7 @@
 //! Text Detection Task Adapter
 //!
 //! This adapter uses the DB model and adapts its output to the TextDetection task format.
+use crate::models::detection::db::{DbGeometry, DetectionPreprocessing};
 
 use crate::apply_ort_config;
 use crate::core::OCRError;
@@ -20,6 +21,8 @@ use crate::processors::{BoxType, ScoreMode};
 pub struct TextDetectionAdapter {
     /// The underlying DB model
     model: DBModel,
+    preprocessing: DetectionPreprocessing,
+    geometry: DbGeometry,
     /// Adapter information
     info: AdapterInfo,
     /// Task configuration
@@ -42,12 +45,15 @@ impl ModelAdapter for TextDetectionAdapter {
         let image_refs: Vec<_> = input.images.iter().map(AsRef::as_ref).collect();
 
         // Use the DB model to detect text with error context
+        let geometry_config = crate::processors::DBPostProcessConfig::new(
+            effective_config.score_threshold,
+            effective_config.box_threshold,
+            effective_config.unclip_ratio,
+        );
         let model_output = self.model
-            .forward_refs(
-                &image_refs,
-                effective_config.score_threshold,
-                effective_config.box_threshold,
-                effective_config.unclip_ratio,
+            .detect_with_geometry(
+                &image_refs, self.preprocessing, self.geometry,
+                effective_config.limit_side_len.unwrap_or(1280), &geometry_config,
             )
             .map_err(|e| {
                 OCRError::adapter_execution_error(
@@ -97,11 +103,23 @@ impl_adapter_builder! {
     task_type: TextDetection,
 
     fields: {
+        preprocessing: DetectionPreprocessing = DetectionPreprocessing::Standard,
+        geometry: DbGeometry = DbGeometry::Standard,
         text_type: Option<String> = None,
         model_name_override: Option<String> = None,
     },
 
     methods: {
+        /// Set the border and resize policy for text detection.
+        pub fn preprocessing(mut self, policy: DetectionPreprocessing) -> Self {
+            self.preprocessing = policy;
+            self
+        }
+        /// Set the polygon extraction policy for DB detections.
+        pub fn geometry(mut self, policy: DbGeometry) -> Self {
+            self.geometry = policy;
+            self
+        }
         /// Sets the text type for preprocessing and postprocessing configuration.
         ///
         /// This matches the text_type parameter:
@@ -189,7 +207,7 @@ impl_adapter_builder! {
         }
 
         Ok(TextDetectionAdapter {
-            model,
+            preprocessing:builder.preprocessing, geometry:builder.geometry,model,
             info,
             config: task_config,
         })

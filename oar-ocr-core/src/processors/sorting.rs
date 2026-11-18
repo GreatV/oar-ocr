@@ -33,14 +33,19 @@ use crate::processors::BoundingBox;
 ///
 /// A vector of sorted bounding boxes
 pub fn sort_quad_boxes(boxes: &[BoundingBox]) -> Vec<BoundingBox> {
-    if boxes.is_empty() {
-        return Vec::new();
-    }
+    quad_box_order(boxes)
+        .into_iter()
+        .map(|i| boxes[i].clone())
+        .collect()
+}
 
-    let mut sorted: Vec<BoundingBox> = boxes.to_vec();
+/// Return indices in the same reading order as `sort_quad_boxes`.
+pub fn quad_box_order(boxes: &[BoundingBox]) -> Vec<usize> {
+    let mut sorted: Vec<_> = (0..boxes.len()).collect();
 
     // Sort by y-coordinate first (top-left point), then by x-coordinate
-    sorted.sort_by(|a, b| {
+    sorted.sort_by(|&i, &j| {
+        let (a, b) = (&boxes[i], &boxes[j]);
         let a_y = a.y_min();
         let a_x = a.x_min();
         let b_y = b.y_min();
@@ -66,10 +71,10 @@ pub fn sort_quad_boxes(boxes: &[BoundingBox]) -> Vec<BoundingBox> {
                 break;
             }
 
-            let curr_y = sorted[j].y_min();
-            let next_y = sorted[j + 1].y_min();
-            let curr_x = sorted[j].x_min();
-            let next_x = sorted[j + 1].x_min();
+            let curr_y = boxes[sorted[j]].y_min();
+            let next_y = boxes[sorted[j + 1]].y_min();
+            let curr_x = boxes[sorted[j]].x_min();
+            let next_x = boxes[sorted[j + 1]].x_min();
 
             // Check if boxes are on the same horizontal line (within 10 pixels)
             if (next_y - curr_y).abs() < 10.0 && next_x < curr_x {

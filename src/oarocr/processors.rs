@@ -511,3 +511,5 @@ mod tests {
         Ok(())
     }
 }
+
+pub(crate) mod thai;

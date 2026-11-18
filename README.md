@@ -25,6 +25,7 @@ Install the standalone tool with `cargo install oar-ocr-cli` (or add `--features
 
 ```bash
 oar ocr page.png
+oar ocr --preset openthai thai-page.png --device cpu
 oar indra page.png --device cpu
 oar structure page.png -o documents
 oar parse --model PaddlePaddle/PaddleOCR-VL-1.5 page.png
@@ -168,6 +169,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Both pipelines export the same [page JSON](docs/page-format.md): `page.to_json(width, height)` here, and `StructureResult::to_json(width, height)` for the classic structure pipeline.
 
 ## Supported Models
+
+OpenThai2.0-OCR-Text reads printed Thai and English into ordered lines and word boxes. Its second recognizer handles Latin look-alikes in loopless Thai fonts. [OpenThai usage guide](docs/usage.md#openthai-text)
 
 The classic pipeline runs ONNX models through ONNX Runtime and supports the following model families. See the [pre-trained model guide](docs/models.md) for exact checkpoints, dictionaries, download links, and auto-download names.
 

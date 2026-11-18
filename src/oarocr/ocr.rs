@@ -8,9 +8,9 @@ use super::builder_utils::{
     apply_gpu_memory_budget, build_optional_adapter, default_cpu_region_batch_size,
     resolve_device_batch_sizes, resolve_model_path, resolve_model_source,
 };
+use super::reading;
 use oar_ocr_core::core::ModelSource;
 use oar_ocr_core::core::config::OrtSessionConfig;
-use oar_ocr_core::core::constants::DEFAULT_REC_IMAGE_SHAPE;
 use oar_ocr_core::core::errors::OCRError;
 use oar_ocr_core::core::traits::OrtConfigurable;
 use oar_ocr_core::core::traits::adapter::{AdapterBuilder, ModelAdapter};
@@ -23,17 +23,23 @@ use oar_ocr_core::domain::adapters::{
 };
 use oar_ocr_core::domain::tasks::{TextDetectionConfig, TextRecognitionConfig};
 use oar_ocr_core::processors::BoundingBox;
+use reading::options::PageStages;
+pub use reading::options::{
+    CropStrategy, CtcDecoding, DbGeometry, DetectionPreprocessing, PageOrientation, ReadingOrder,
+    RecognitionPreprocessing, SecondaryRouting, TextPostprocessing,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Internal structure holding the OCR pipeline adapters.
 #[derive(Debug)]
-struct OCRPipeline {
-    rectification_adapter: Option<UVDocRectifierAdapter>,
-    document_orientation_adapter: Option<DocumentOrientationAdapter>,
-    text_detection_adapter: TextDetectionAdapter,
-    text_line_orientation_adapter: Option<TextLineOrientationAdapter>,
-    text_recognition_adapter: TextRecognitionAdapter,
+pub(super) struct OCRPipeline {
+    pub(super) rectification_adapter: Option<UVDocRectifierAdapter>,
+    pub(super) document_orientation_adapter: Option<DocumentOrientationAdapter>,
+    pub(super) text_detection_adapter: TextDetectionAdapter,
+    pub(super) text_line_orientation_adapter: Option<TextLineOrientationAdapter>,
+    pub(super) text_recognition_adapter: TextRecognitionAdapter,
+    pub(super) secondary_recognizer: Option<(TextRecognitionAdapter, SecondaryRouting)>,
 }
 
 /// Builder for constructing OCR pipelines.
@@ -64,6 +70,8 @@ struct OCRPipeline {
 /// ```
 #[derive(Debug)]
 pub struct OAROCRBuilder {
+    stages: PageStages,
+    secondary_recognizer: Option<(ModelSource, SecondaryRouting)>,
     // Required fields
     text_detection_model: ModelSource,
     text_recognition_model: ModelSource,
@@ -176,6 +184,8 @@ impl OAROCRBuilder {
             text_recognition_model: text_recognition_model.into(),
             character_dict_path: character_dict_path.into(),
             character_dict_content: None,
+            stages: PageStages::default(),
+            secondary_recognizer: None,
             document_orientation_model: None,
             text_line_orientation_model: None,
             document_rectification_model: None,
@@ -224,8 +234,128 @@ impl OAROCRBuilder {
         .with_preset_detection_config(pp_ocrv6_detection_config(size))
     }
 
-    /// Records a preset's detection defaults without occupying the explicit
-    /// [`text_detection_config`](Self::text_detection_config) slot.
+    /// Build the OpenThai v2.1 preset from registered detector, recognizers and dictionary names.
+    pub fn openthai() -> Self {
+        Self::new(
+            "pp-ocrv6_tiny_det.onnx",
+            "openthai2_rec.onnx",
+            "openthai2_dict.txt",
+        )
+        .with_openthai_defaults("openthai2_rec2.onnx")
+    }
+    /// Load the OpenThai v2.1 preset from the upstream filenames in a local directory.
+    pub fn openthai_from_dir(dir: impl AsRef<std::path::Path>) -> Self {
+        let dir = dir.as_ref();
+        Self::new(
+            dir.join("det.onnx"),
+            dir.join("rec.onnx"),
+            dir.join("rec_dict.txt"),
+        )
+        .with_openthai_defaults(dir.join("rec2.onnx"))
+    }
+    fn with_openthai_defaults(self, secondary: impl Into<ModelSource>) -> Self {
+        let mut detection = pp_ocrv6_detection_config(PpOcrV6Size::Tiny);
+        detection.limit_side_len = Some(1280);
+        self.with_preset_detection_config(detection)
+            .detection_preprocessing(DetectionPreprocessing::PaddedLongSide)
+            .db_geometry(DbGeometry::OpenCv)
+            .recognition_preprocessing(RecognitionPreprocessing::Flatten)
+            .region_batch_size(16)
+            .text_recognition_config(TextRecognitionConfig {
+                score_threshold: 0.8,
+            })
+            .recognize_line_images(true)
+            .ctc_decoding(CtcDecoding::FrameSpans)
+            .return_word_box(true)
+            .crop_strategy(CropStrategy::PerspectiveCubic)
+            .split_line_gaps(true)
+            .recognize_tall_rotations(true)
+            .text_postprocessing(TextPostprocessing::ThaiPrinted)
+            .secondary_recognizer(secondary, SecondaryRouting::MixedThaiLatin)
+            .page_orientation(PageOrientation::RecognitionVote)
+            .deskew_threshold(Some(2.5))
+            .reading_order(ReadingOrder::TextColumns)
+            .reattach_marks(true)
+    }
+    /// Load a secondary recognizer for lines selected by the routing policy.
+    pub fn secondary_recognizer(
+        mut self,
+        model: impl Into<ModelSource>,
+        routing: SecondaryRouting,
+    ) -> Self {
+        self.secondary_recognizer = Some((model.into(), routing));
+        self
+    }
+    /// Disable secondary recognition for all lines.
+    pub fn without_secondary_recognizer(mut self) -> Self {
+        self.secondary_recognizer = None;
+        self
+    }
+    /// Select the detector input border and resize policy.
+    pub fn detection_preprocessing(mut self, value: DetectionPreprocessing) -> Self {
+        self.stages.detection_preprocessing = value;
+        self
+    }
+    /// Select the polygon scoring and expansion policy for DB detections.
+    pub fn db_geometry(mut self, value: DbGeometry) -> Self {
+        self.stages.db_geometry = value;
+        self
+    }
+    /// Recognize a small line-shaped input as one crop when detection returns no boxes.
+    pub fn recognize_line_images(mut self, value: bool) -> Self {
+        self.stages.recognize_line_images = value;
+        self
+    }
+    /// Select the line background normalization and width policy.
+    pub fn recognition_preprocessing(mut self, value: RecognitionPreprocessing) -> Self {
+        self.stages.recognition_preprocessing = value;
+        self
+    }
+    /// Select how the recognizer collapses CTC runs and records their positions.
+    pub fn ctc_decoding(mut self, value: CtcDecoding) -> Self {
+        self.stages.ctc_decoding = value;
+        self
+    }
+    /// Select the resampling policy for detected line crops.
+    pub fn crop_strategy(mut self, value: CropStrategy) -> Self {
+        self.stages.crop_strategy = value;
+        self
+    }
+    /// Split wide crops at blank gutters and compare the readings with the original line.
+    pub fn split_line_gaps(mut self, value: bool) -> Self {
+        self.stages.split_line_gaps = value;
+        self
+    }
+    /// Compare the upright and both quarter-turned readings of tall crops.
+    pub fn recognize_tall_rotations(mut self, value: bool) -> Self {
+        self.stages.recognize_tall_rotations = value;
+        self
+    }
+    /// Select the text normalization and line filtering policy.
+    pub fn text_postprocessing(mut self, value: TextPostprocessing) -> Self {
+        self.stages.text_postprocessing = value;
+        self
+    }
+    /// Select the document orientation strategy.
+    pub fn page_orientation(mut self, value: PageOrientation) -> Self {
+        self.stages.page_orientation = value;
+        self
+    }
+    /// Redetect pages after correcting text angles at or above this absolute threshold in degrees.
+    pub fn deskew_threshold(mut self, value: Option<f64>) -> Self {
+        self.stages.deskew_threshold = value;
+        self
+    }
+    /// Select the ordering and row-grouping strategy.
+    pub fn reading_order(mut self, value: ReadingOrder) -> Self {
+        self.stages.reading_order = value;
+        self
+    }
+    /// Attach displaced tone marks to accepted lines and reread their expanded crops.
+    pub fn reattach_marks(mut self, value: bool) -> Self {
+        self.stages.reattach_marks = value;
+        self
+    }
     fn with_preset_detection_config(mut self, config: TextDetectionConfig) -> Self {
         self.preset_text_detection_config = Some(config);
         self
@@ -509,7 +639,9 @@ impl OAROCRBuilder {
         )?;
 
         // Build text detection adapter (required)
-        let mut detection_builder = TextDetectionAdapterBuilder::new();
+        let mut detection_builder = TextDetectionAdapterBuilder::new()
+            .preprocessing(self.stages.detection_preprocessing)
+            .geometry(self.stages.db_geometry);
 
         if let Some(ref ort_config) = self.ort_session_config {
             detection_builder = detection_builder.with_ort_config(ort_config.clone());
@@ -535,29 +667,42 @@ impl OAROCRBuilder {
         // Parse char_dict into Vec<String> - one character per line
         let char_dict_vec: Vec<String> = char_dict.lines().map(|s| s.to_string()).collect();
 
-        let mut recognition_builder = TextRecognitionAdapterBuilder::new()
-            .character_dict(char_dict_vec)
-            .return_word_box(self.return_word_box);
-
-        if let Some(ref ort_config) = self.ort_session_config {
-            recognition_builder = recognition_builder.with_ort_config(ort_config.clone());
-        }
-
-        if let Some(ref rec_config) = self.text_recognition_config {
-            recognition_builder = recognition_builder.with_config(rec_config.clone());
-        }
-
-        let text_recognition_adapter = recognition_builder.build(text_recognition_model)?;
-
+        let build_recognizer = |source, dict| {
+            let mut builder = TextRecognitionAdapterBuilder::new()
+                .character_dict(dict)
+                .return_word_box(self.return_word_box);
+            if let Some(config) = &self.ort_session_config {
+                builder = builder.with_ort_config(config.clone());
+            }
+            if let Some(config) = &self.text_recognition_config {
+                builder = builder.with_config(config.clone());
+            }
+            builder.build(source)
+        };
+        let secondary_recognizer = if let Some((model, routing)) = &self.secondary_recognizer {
+            Some((
+                build_recognizer(resolve_model_source(model)?, char_dict_vec.clone())?,
+                *routing,
+            ))
+        } else {
+            None
+        };
+        let text_recognition_adapter = build_recognizer(text_recognition_model, char_dict_vec)?;
         let pipeline = OCRPipeline {
             rectification_adapter,
             document_orientation_adapter,
             text_detection_adapter,
             text_line_orientation_adapter,
             text_recognition_adapter,
+            secondary_recognizer,
         };
 
         Ok(OAROCR {
+            rec_score_threshold: self
+                .text_recognition_config
+                .as_ref()
+                .map_or(0., |c| c.score_threshold),
+            stages: self.stages,
             pipeline,
             text_type: self.text_type,
             return_word_box: self.return_word_box,
@@ -586,40 +731,19 @@ impl OAROCRBuilder {
 /// to extract text.
 #[derive(Debug)]
 pub struct OAROCR {
-    pipeline: OCRPipeline,
-    text_type: Option<String>,
-    return_word_box: bool,
+    pub(super) rec_score_threshold: f32,
+    pub(super) stages: PageStages,
+    pub(super) pipeline: OCRPipeline,
+    pub(super) text_type: Option<String>,
+    pub(super) return_word_box: bool,
     /// Text detection batch size for `predict(images)`.
     ///
     /// This controls how many preprocessed images are sent to the text detection adapter in a
     /// single call. CPU builders resolve this to `1`; accelerator builders leave it as `None`
     /// so the adapter's `recommended_batch_size()` is used.
-    image_batch_size: Option<usize>,
+    pub(super) image_batch_size: Option<usize>,
     /// Batch size for text region recognition
-    region_batch_size: Option<usize>,
-}
-
-struct CroppedTextRegion {
-    detection_index: usize,
-    bbox: BoundingBox,
-    image: Arc<image::RgbImage>,
-    wh_ratio: f32,
-    line_orientation_angle: Option<f32>,
-}
-
-impl std::fmt::Debug for CroppedTextRegion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CroppedTextRegion")
-            .field("detection_index", &self.detection_index)
-            .field("bbox", &self.bbox)
-            .field(
-                "image",
-                &format_args!("RgbImage({}x{})", self.image.width(), self.image.height()),
-            )
-            .field("wh_ratio", &self.wh_ratio)
-            .field("line_orientation_angle", &self.line_orientation_angle)
-            .finish()
-    }
+    pub(super) region_batch_size: Option<usize>,
 }
 
 impl OAROCR {
@@ -669,6 +793,18 @@ impl OAROCR {
         &self,
         images: Vec<image::RgbImage>,
     ) -> Result<Vec<crate::oarocr::OAROCRResult>, OCRError> {
+        Ok(self
+            .predict_with_rows(images)?
+            .into_iter()
+            .map(|(page, _)| page)
+            .collect())
+    }
+
+    /// Return each page with its region-aligned row IDs for joining same-row text with spaces and rows with newlines.
+    pub fn predict_with_rows(
+        &self,
+        images: Vec<image::RgbImage>,
+    ) -> Result<Vec<(crate::oarocr::OAROCRResult, Vec<usize>)>, OCRError> {
         use crate::oarocr::preprocess::DocumentPreprocessor;
         use std::sync::Arc;
 
@@ -717,7 +853,7 @@ impl OAROCR {
                 .map(|(_, preprocess)| Arc::clone(&preprocess.image))
                 .collect();
 
-            match self.detect_sorted_text_boxes_batch(batch_images) {
+            match self.detect_text_boxes_batch(batch_images) {
                 Ok(batch_boxes) => {
                     for (offset, boxes) in batch_boxes.into_iter().enumerate() {
                         all_detection_boxes[start + offset] = boxes;
@@ -732,8 +868,7 @@ impl OAROCR {
                         "Batched text detection failed; falling back to per-image detection"
                     );
                     for i in start..end {
-                        all_detection_boxes[i] =
-                            self.detect_sorted_text_boxes(&prepared[i].1.image)?;
+                        all_detection_boxes[i] = self.detect_text_boxes(&prepared[i].1.image)?;
                     }
                 }
             }
@@ -741,76 +876,57 @@ impl OAROCR {
             start = end;
         }
 
-        // Phase 1: crop + line-orientation per image into a shared pool tagged by
-        // image index. Recognizing crops together (vs one batch per image) yields
-        // batches that are both larger (better GPU use) and width-tighter (less
-        // padding waste/drift), since same-width crops are plentiful across pages.
-        //
-        // Bounded by `MAX_POOLED_CROPS`: each crop's `Arc<RgbImage>` lives until its
-        // batch runs, so an unbounded pool grows peak memory with the input and can
-        // OOM on big multi-page calls. We flush (recognize + scatter) on reaching
-        // the cap; it's high enough that typical batches still pool fully.
-        const MAX_POOLED_CROPS: usize = 4096;
-        let mut per_image_results: Vec<Vec<Option<crate::oarocr::TextRegion>>> =
-            all_detection_boxes
-                .iter()
-                .map(|b| vec![None; b.len()])
-                .collect();
-        let total_crops: usize = all_detection_boxes.iter().map(|b| b.len()).sum();
-        let mut global_crops: Vec<(usize, CroppedTextRegion)> =
-            Vec::with_capacity(total_crops.min(MAX_POOLED_CROPS));
-        for (img_idx, (_, preprocess)) in prepared.iter().enumerate() {
-            let mut crops =
-                self.crop_text_regions(&preprocess.image, &all_detection_boxes[img_idx])?;
-            self.classify_line_orientations(&mut crops)?;
-            for crop in crops {
-                global_crops.push((img_idx, crop));
-                if global_crops.len() >= MAX_POOLED_CROPS {
-                    // Flush mid-image as well: a single dense page can exceed the cap
-                    // on its own, so checking only between images would let the pool
-                    // (and its live `Arc<RgbImage>`s) grow past the bound before any
-                    // flush runs. `replace` (not `take`) keeps a pre-sized buffer for
-                    // the next wave, so repeated flushes don't re-grow from zero.
-                    let pool =
-                        std::mem::replace(&mut global_crops, Vec::with_capacity(MAX_POOLED_CROPS));
-                    self.recognize_global(pool, &mut per_image_results)?;
-                }
-            }
-        }
-
-        // Phase 2: recognize the remaining pool and scatter results back per image.
-        if !global_crops.is_empty() {
-            self.recognize_global(global_crops, &mut per_image_results)?;
-        }
-
-        // Phase 3: assemble per-image results (reading order + rotate-back).
-        let mut results = Vec::with_capacity(prepared.len());
-        for (img_idx, (((input_img_arc, preprocess), image_results), boxes)) in prepared
-            .into_iter()
-            .zip(per_image_results)
+        let inputs = prepared
+            .iter()
+            .map(|(_, p)| &p.image)
             .zip(all_detection_boxes)
-            .enumerate()
+            .map(|(img, boxes)| (img, self.line_image_fallback(img, boxes)));
+        let pages = if self.stages.needs_page_loop() {
+            inputs
+                .map(|(image, boxes)| self.read_working_page(image, boxes))
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            let inputs: Vec<_> = inputs.collect();
+            self.read_batch(&inputs)?
+                .into_iter()
+                .zip(&inputs)
+                .map(|(page, (image, _))| {
+                    self.finish_page(image, page, &nalgebra::Matrix3::identity())
+                        .map(|(regions, rows)| (regions, rows, 0))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut results = Vec::with_capacity(prepared.len());
+        for (img_idx, ((input_img_arc, preprocess), (mut text_regions, rows, rotation))) in
+            prepared.into_iter().zip(pages).enumerate()
         {
-            let mut text_regions = Self::regions_for_all_detections(boxes, image_results);
-
             if let Some(rot) = preprocess.rotation {
                 Self::rotate_text_regions_back(&mut text_regions, rot);
             }
 
-            results.push(crate::oarocr::OAROCRResult {
-                input_path: Arc::from(format!("image_{}", img_idx)),
-                index: img_idx,
-                input_img: input_img_arc,
-                text_regions,
-                orientation_angle: preprocess.orientation_angle,
-                rectified_img: preprocess.rectified_img,
-            });
+            results.push((
+                crate::oarocr::OAROCRResult {
+                    input_path: Arc::from(format!("image_{}", img_idx)),
+                    index: img_idx,
+                    input_img: input_img_arc,
+                    text_regions,
+                    orientation_angle: if self.stages.page_orientation
+                        == PageOrientation::RecognitionVote
+                    {
+                        Some((preprocess.orientation_angle.unwrap_or(0.) + rotation as f32) % 360.)
+                    } else {
+                        preprocess.orientation_angle
+                    },
+                    rectified_img: preprocess.rectified_img,
+                },
+                rows,
+            ));
         }
 
         Ok(results)
     }
 
-    fn detect_sorted_text_boxes_batch(
+    fn detect_text_boxes_batch(
         &self,
         images: Vec<Arc<image::RgbImage>>,
     ) -> Result<Vec<Vec<BoundingBox>>, OCRError> {
@@ -821,252 +937,42 @@ impl OAROCR {
         let input = ImageTaskInput::from_arc_images(images);
         let det = self.pipeline.text_detection_adapter.execute(input, None)?;
 
-        let mut results: Vec<Vec<BoundingBox>> = Vec::with_capacity(det.detections.len());
-        for detections in det.detections.into_iter() {
-            let boxes = detections.into_iter().map(|d| d.bbox).collect::<Vec<_>>();
-            results.push(self.sort_detection_boxes(&boxes));
-        }
-
-        Ok(results)
+        Ok(det
+            .detections
+            .into_iter()
+            .map(|detections| detections.into_iter().map(|d| d.bbox).collect())
+            .collect())
     }
 
-    fn detect_sorted_text_boxes(
+    pub(super) fn detect_text_boxes(
         &self,
         image: &Arc<image::RgbImage>,
     ) -> Result<Vec<BoundingBox>, OCRError> {
-        let input = ImageTaskInput::from_arc_images(vec![Arc::clone(image)]);
-        let det = self.pipeline.text_detection_adapter.execute(input, None)?;
-
-        let boxes = det
-            .detections
-            .into_iter()
-            .next()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|d| d.bbox)
-            .collect::<Vec<_>>();
-
-        Ok(self.sort_detection_boxes(&boxes))
+        Ok(self
+            .detect_text_boxes_batch(vec![Arc::clone(image)])?
+            .pop()
+            .unwrap_or_default())
     }
 
-    fn sort_detection_boxes(&self, boxes: &[BoundingBox]) -> Vec<BoundingBox> {
-        if boxes.is_empty() {
-            return Vec::new();
-        }
-
-        let is_seal_text = self
-            .text_type
-            .as_ref()
-            .map(|t| t.to_lowercase() == "seal")
-            .unwrap_or(false);
-
-        if is_seal_text {
-            crate::processors::sort_poly_boxes(boxes)
-        } else {
-            crate::processors::sort_quad_boxes(boxes)
-        }
-    }
-
-    fn crop_text_regions(
+    pub(super) fn line_orientations(
         &self,
-        image: &Arc<image::RgbImage>,
-        detection_boxes: &[BoundingBox],
-    ) -> Result<Vec<CroppedTextRegion>, OCRError> {
-        use crate::oarocr::EdgeProcessor;
-        use crate::oarocr::TextCroppingProcessor;
-
-        if detection_boxes.is_empty() {
+        images: Vec<Arc<image::RgbImage>>,
+    ) -> Result<Vec<Option<f32>>, OCRError> {
+        let Some(adapter) = &self.pipeline.text_line_orientation_adapter else {
+            return Ok(vec![None; images.len()]);
+        };
+        if images.is_empty() {
             return Ok(Vec::new());
         }
-
-        let processor = TextCroppingProcessor::new(true); // handle_rotation = true
-        // Zero-copy: share Arc instead of cloning the image
-        let cropped = processor.process((Arc::clone(image), detection_boxes.to_vec()))?;
-
-        let mut regions = Vec::new();
-        for (idx, crop_result) in cropped.into_iter().enumerate() {
-            let Some(img) = crop_result else {
-                continue;
-            };
-            let wh_ratio = img.width() as f32 / img.height().max(1) as f32;
-            regions.push(CroppedTextRegion {
-                detection_index: idx,
-                bbox: detection_boxes
-                    .get(idx)
-                    .cloned()
-                    .unwrap_or_else(|| BoundingBox::from_coords(0.0, 0.0, 0.0, 0.0)),
-                image: img,
-                wh_ratio,
-                line_orientation_angle: None,
-            });
-        }
-
-        Ok(regions)
-    }
-
-    fn classify_line_orientations(
-        &self,
-        regions: &mut [CroppedTextRegion],
-    ) -> Result<(), OCRError> {
-        let Some(ref line_orientation_adapter) = self.pipeline.text_line_orientation_adapter else {
-            return Ok(());
-        };
-
-        if regions.is_empty() {
-            return Ok(());
-        }
-
-        let input_images = regions.iter().map(|r| Arc::clone(&r.image)).collect();
-        let input = ImageTaskInput::from_arc_images(input_images);
-        let orient = line_orientation_adapter.execute(input, None)?;
-
-        for (idx, classifications) in orient
+        let n = images.len();
+        let orient = adapter.execute(ImageTaskInput::from_arc_images(images), None)?;
+        let mut angles: Vec<_> = orient
             .classifications
             .iter()
-            .enumerate()
-            .take(regions.len())
-        {
-            let Some(top_class) = classifications.first() else {
-                continue;
-            };
-
-            // Convert class_id to angle (0=0°, 1=180°)
-            let angle = (top_class.class_id as f32) * 180.0;
-            regions[idx].line_orientation_angle = Some(angle);
-
-            if top_class.class_id == 1 {
-                regions[idx].image =
-                    Arc::new(image::imageops::rotate180(regions[idx].image.as_ref()));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Recognizes a global pool of crops (gathered across all images) and scatters
-    /// each result back into `per_image_results[image_index][detection_index]`.
-    ///
-    /// Crops are sorted by width/height ratio across the whole batch of images and
-    /// chunked into fixed-size batches, so each recognition batch is
-    /// width-homogeneous (minimal zero-padding) yet well-filled. Pooling across
-    /// images gives many more same-width crops than any single page, which makes
-    /// the batches both tighter and larger than per-image batching could.
-    fn recognize_global(
-        &self,
-        mut crops: Vec<(usize, CroppedTextRegion)>,
-        per_image_results: &mut [Vec<Option<crate::oarocr::TextRegion>>],
-    ) -> Result<(), OCRError> {
-        if crops.is_empty() {
-            return Ok(());
-        }
-
-        crops.sort_by(|a, b| {
-            a.1.wh_ratio
-                .partial_cmp(&b.1.wh_ratio)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let base_rec_ratio = DEFAULT_REC_IMAGE_SHAPE[2] as f32 / DEFAULT_REC_IMAGE_SHAPE[1] as f32;
-        let batch_size = self
-            .region_batch_size
-            .unwrap_or_else(|| {
-                self.pipeline
-                    .text_recognition_adapter
-                    .recommended_batch_size()
-            })
-            .max(1);
-
-        for chunk in crops.chunks(batch_size) {
-            let chunk_max_wh_ratio = chunk
-                .iter()
-                .map(|(_, r)| r.wh_ratio)
-                .fold(base_rec_ratio, |acc, r| acc.max(r));
-
-            let rec_input = ImageTaskInput::from_arc_images(
-                chunk.iter().map(|(_, r)| Arc::clone(&r.image)).collect(),
-            );
-
-            let rec = self
-                .pipeline
-                .text_recognition_adapter
-                .execute(rec_input, None)?;
-
-            let n = rec.texts.len().min(chunk.len());
-            for (i, (img_idx, region)) in chunk.iter().take(n).enumerate() {
-                let text = rec.texts.get(i).map(String::as_str).unwrap_or("");
-                let score = *rec.scores.get(i).unwrap_or(&0.0);
-
-                let char_positions: &[f32] = rec
-                    .char_positions
-                    .get(i)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
-                let col_indices: &[usize] = rec
-                    .char_col_indices
-                    .get(i)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
-                let seq_len = *rec.sequence_lengths.get(i).unwrap_or(&0);
-
-                let bbox = region.bbox.clone();
-                let word_boxes = if self.return_word_box && !col_indices.is_empty() && seq_len > 0 {
-                    Some(Self::ctc_word_boxes(
-                        &bbox,
-                        text,
-                        col_indices,
-                        seq_len,
-                        region.wh_ratio,
-                        chunk_max_wh_ratio,
-                    ))
-                } else if self.return_word_box && !char_positions.is_empty() {
-                    Some(Self::char_positions_to_word_boxes(
-                        &bbox,
-                        char_positions,
-                        text.chars().count(),
-                    ))
-                } else {
-                    None
-                };
-
-                if let Some(image_results) = per_image_results.get_mut(*img_idx)
-                    && region.detection_index < image_results.len()
-                {
-                    image_results[region.detection_index] = Some(crate::oarocr::TextRegion {
-                        bounding_box: bbox.clone(),
-                        dt_poly: Some(bbox.clone()),
-                        rec_poly: Some(bbox),
-                        text: Some(std::sync::Arc::from(text)),
-                        confidence: Some(score),
-                        orientation_angle: region.line_orientation_angle,
-                        word_boxes,
-                        label: None,
-                    });
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// One region per detection box, in detection order. A box whose crop
-    /// failed (or that got no recognition result) is kept with `text: None`
-    /// and `confidence: None` instead of being dropped, so callers still see
-    /// that text was detected there.
-    fn regions_for_all_detections(
-        boxes: Vec<BoundingBox>,
-        results: Vec<Option<crate::oarocr::TextRegion>>,
-    ) -> Vec<crate::oarocr::TextRegion> {
-        boxes
-            .into_iter()
-            .zip(results)
-            .map(|(bbox, result)| {
-                result.unwrap_or_else(|| {
-                    let mut region = crate::oarocr::TextRegion::new(bbox.clone());
-                    region.dt_poly = Some(bbox);
-                    region
-                })
-            })
-            .collect()
+            .map(|classes| classes.first().map(|c| c.class_id as f32 * 180.))
+            .collect();
+        angles.resize(n, None);
+        Ok(angles)
     }
 
     fn rotate_text_regions_back(
@@ -1119,7 +1025,7 @@ impl OAROCR {
     /// # Returns
     ///
     /// A vector of bounding boxes, one for each character
-    fn ctc_word_boxes(
+    pub(super) fn ctc_word_boxes(
         line_bbox: &BoundingBox,
         text: &str,
         col_indices: &[usize],
@@ -1206,7 +1112,7 @@ impl OAROCR {
     /// # Returns
     ///
     /// A vector of bounding boxes, one for each character/word
-    fn char_positions_to_word_boxes(
+    pub(super) fn char_positions_to_word_boxes(
         line_bbox: &BoundingBox,
         char_positions: &[f32],
         char_count: usize,
@@ -1258,28 +1164,6 @@ impl OAROCR {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn detections_without_a_recognition_result_are_kept_without_text() {
-        let a = BoundingBox::from_coords(0.0, 0.0, 10.0, 5.0);
-        let b = BoundingBox::from_coords(0.0, 10.0, 10.0, 15.0);
-        let recognized = crate::oarocr::TextRegion::with_recognition(
-            a.clone(),
-            Some(std::sync::Arc::from("hello")),
-            Some(0.9),
-        );
-        let regions =
-            OAROCR::regions_for_all_detections(vec![a, b.clone()], vec![Some(recognized), None]);
-        assert_eq!(regions.len(), 2);
-        assert_eq!(regions[0].text.as_deref(), Some("hello"));
-        assert_eq!(regions[1].text, None);
-        assert_eq!(regions[1].confidence, None);
-        assert_eq!(regions[1].bounding_box.points, b.points);
-        assert_eq!(
-            regions[1].dt_poly.as_ref().map(|p| &p.points),
-            Some(&b.points)
-        );
-    }
 
     #[test]
     fn pp_ocrv6_preset_sets_names_and_official_detection_defaults() {
