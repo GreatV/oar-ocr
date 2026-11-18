@@ -4,7 +4,7 @@ use crate::{
     render::{markdown::native_chart, table::latex, text::normalize_printed_text},
 };
 use regex::{Captures, Regex};
-use std::{collections::HashSet, sync::LazyLock};
+use std::{borrow::Cow, collections::HashSet, sync::LazyLock};
 
 static ELEMENT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)<x_([0-9]+(?:\.[0-9]+)?)><y_([0-9]+(?:\.[0-9]+)?)>(.*?)<x_([0-9]+(?:\.[0-9]+)?)><y_([0-9]+(?:\.[0-9]+)?)><class_([^>]+)>").unwrap()
@@ -18,12 +18,11 @@ fn coordinates(fields: &Captures<'_>) -> [f64; 4] {
     [1, 2, 4, 5].map(|i| fields[i].parse::<f64>().expect("numeric coordinate token"))
 }
 
-fn prepare_completion(completion: &str) -> String {
-    let text = completion.replace("<s>", "").replace("</s>", "");
+fn prepare_completion(text: &str) -> Cow<'_, str> {
     if text.contains("```") || text.contains("<class_Code>") || text.contains("<class_Formula>") {
-        text
+        Cow::Borrowed(text)
     } else {
-        PREFIX.replace_all(&text, "$1").into_owned()
+        PREFIX.replace_all(text, "$1")
     }
 }
 
@@ -48,8 +47,8 @@ pub(crate) fn source_boxes(raw: &str) -> Option<impl Iterator<Item = (String, [f
     Some(boxes.into_iter())
 }
 
-pub(super) fn parse(raw: &str) -> PageDocument {
-    let completion = prepare_completion(raw.strip_prefix(super::PROMPT).unwrap_or(raw));
+pub(super) fn parse(raw: String, completion: &str) -> PageDocument {
+    let completion = prepare_completion(completion);
     let mut page = PageDocument::default();
     let mut fragments = Vec::new();
     let mut context = Vec::new();
@@ -114,7 +113,7 @@ pub(super) fn parse(raw: &str) -> PageDocument {
             .join("\n\n")
     };
     page.markdown = Some(latex::promote_html_headers(&markdown).into_owned());
-    page.raw_output = Some(raw.to_owned());
+    page.raw_output = Some(raw);
     page
 }
 
@@ -125,20 +124,44 @@ mod tests {
 
     #[test]
     fn empty_completion_renders_empty_markdown() {
-        let raw = format!("{PROMPT}</s>");
-        let page = parse(&raw);
-        assert_eq!(page.markdown.as_deref(), Some(""));
-        assert!(page.blocks.is_empty());
-        assert_eq!(page.raw_output.as_deref(), Some(raw.as_str()));
+        use crate::nemotron_parse::{Generation, parse_generation};
+        use tokenizers::Tokenizer;
+
+        // A subset of the checkpoint's byte-level vocabulary, including ordinary HTML characters.
+        let tokenizer = Tokenizer::from_bytes(br#"{
+            "model":{"type":"BPE","vocab":{"<s>":0,"</s>":2,"<predict_bbox>":50004,"<":50,"s":105,">":52,"x":110,"/":37},"merges":[]},
+            "decoder":{"type":"ByteLevel","add_prefix_space":true,"trim_offsets":true,"use_regex":true}
+        }"#).unwrap();
+        let generation = Generation {
+            bos_token_id: 0,
+            eos_token_id: 2,
+            max_new_tokens: 32,
+            repetition_penalty: 1.0,
+        };
+        let prompt = [2, 0, 50004];
+        for (completion, markdown, raw_suffix) in [
+            (&[2][..], "", "</s>"),
+            (
+                &[0, 50, 105, 52, 110, 50, 37, 105, 52, 2],
+                "<s>x</s>",
+                "<s><s>x</s></s>",
+            ),
+        ] {
+            let ids = [prompt.as_slice(), completion].concat();
+            let page = parse_generation(&tokenizer, &ids, prompt.len(), &generation).unwrap();
+            assert_eq!(page.markdown.as_deref(), Some(markdown));
+            assert!(page.blocks.is_empty());
+            assert_eq!(
+                page.raw_output.unwrap(),
+                format!("</s><s><predict_bbox>{raw_suffix}")
+            );
+        }
     }
 
     #[test]
     fn pixel_export_uses_decimal_source_and_honors_edited_blocks() {
-        let raw = format!(
-            "{}<x_0.9746><y_1.2>caption<x_0.0234><y_0.0123><class_Caption>",
-            super::super::PROMPT
-        );
-        let mut page = parse(&raw);
+        let completion = "<x_0.9746><y_1.2>caption<x_0.0234><y_0.0123><class_Caption>";
+        let mut page = parse(format!("{PROMPT}{completion}</s>"), completion);
         let bbox = |doc: &PageDocument| doc.to_json(1931, 1073)["blocks"][0]["bbox"].clone();
         assert_eq!(
             bbox(&page),
@@ -151,8 +174,9 @@ mod tests {
     #[test]
     fn repair_empty_prefix_and_deduplicate_exact_elements() {
         let block = "<x_0.1><y_0.2>Hello<x_0.9><y_0.4><class_Title>";
-        let raw = format!("{PROMPT}<x_0><y_0><class_Title>{block}{block}</s>");
-        let page = parse(&raw);
+        let completion = format!("<x_0><y_0><class_Title>{block}{block}");
+        let raw = format!("{PROMPT}{completion}</s>");
+        let page = parse(raw.clone(), &completion);
         assert_eq!(page.blocks.len(), 1);
         assert_eq!(page.blocks[0].bbox, [0.1, 0.2, 0.9, 0.4]);
         assert_eq!(page.markdown.as_deref(), Some("# Hello"));

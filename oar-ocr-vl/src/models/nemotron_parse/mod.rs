@@ -50,7 +50,45 @@ struct ModelConfig {
 struct Generation {
     max_new_tokens: usize,
     repetition_penalty: f32,
+    bos_token_id: u32,
     eos_token_id: u32,
+}
+
+fn decode(tokenizer: &Tokenizer, ids: &[u32]) -> Result<String, Error> {
+    // The checkpoint decodes added tokens using their original spelling (e.g. Thai sara am).
+    // Normalization of those tokens applies when matching the input prompt.
+    let added = tokenizer.get_added_vocabulary().get_added_tokens_decoder();
+    let tokens = ids
+        .iter()
+        .filter_map(|id| {
+            added
+                .get(id)
+                .map(|t| t.content.clone())
+                .or_else(|| tokenizer.get_model().id_to_token(*id))
+        })
+        .collect();
+    tokenizer
+        .get_decoder()
+        .ok_or_else(|| Error::config("Nemotron Parse tokenizer has no decoder"))?
+        .decode(tokens)
+        .map_err(|e| Error::config(e.to_string()))
+}
+
+fn parse_generation(
+    tokenizer: &Tokenizer,
+    ids: &[u32],
+    prompt_len: usize,
+    generation: &Generation,
+) -> Result<PageDocument, Error> {
+    let completion: Vec<_> = ids[prompt_len..]
+        .iter()
+        .copied()
+        .filter(|&id| id != generation.bos_token_id && id != generation.eos_token_id)
+        .collect();
+    Ok(parser::parse(
+        decode(tokenizer, ids)?,
+        &decode(tokenizer, &completion)?,
+    ))
 }
 
 fn infer(error: candle_core::Error) -> Error {
@@ -119,29 +157,6 @@ impl NemotronParse {
         })
     }
 
-    fn decode(&self, ids: &[u32]) -> Result<String, Error> {
-        // The checkpoint decodes added tokens using their original spelling (e.g. Thai sara am).
-        // Normalization of those tokens applies when matching the input prompt.
-        let added = self
-            .tokenizer
-            .get_added_vocabulary()
-            .get_added_tokens_decoder();
-        let tokens = ids
-            .iter()
-            .filter_map(|id| {
-                added
-                    .get(id)
-                    .map(|t| t.content.clone())
-                    .or_else(|| self.tokenizer.get_model().id_to_token(*id))
-            })
-            .collect();
-        self.tokenizer
-            .get_decoder()
-            .ok_or_else(|| Error::config("Nemotron Parse tokenizer has no decoder"))?
-            .decode(tokens)
-            .map_err(|e| Error::config(e.to_string()))
-    }
-
     fn next_token(&self, logits: &Tensor, seen: &[u32]) -> Result<u32, Error> {
         let penalty = self.generation.repetition_penalty;
         #[cfg(feature = "cuda")]
@@ -206,7 +221,6 @@ impl PageParser for NemotronParse {
                 .max_new_tokens
                 .unwrap_or(self.generation.max_new_tokens),
         )?;
-        let raw = self.decode(&ids)?;
-        Ok(parser::parse(&raw))
+        parse_generation(&self.tokenizer, &ids, self.prompt.len(), &self.generation)
     }
 }
