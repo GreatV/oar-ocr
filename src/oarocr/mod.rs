@@ -13,6 +13,7 @@ pub(crate) mod builder_utils;
 pub mod ocr;
 pub(crate) mod preprocess;
 pub mod processors;
+mod reading;
 pub mod result;
 pub mod stitching;
 pub mod structure;

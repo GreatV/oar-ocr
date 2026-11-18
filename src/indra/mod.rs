@@ -51,6 +51,9 @@ mod order;
 mod recognize;
 mod rtl;
 
+pub(crate) use layout::median_f64;
+pub(crate) use order::{is_digit, median_f32};
+
 use image::{GrayImage, RgbImage};
 use oar_ocr_core::core::OCRError;
 use oar_ocr_core::core::config::{ModelInferenceConfig, OrtSessionConfig};

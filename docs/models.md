@@ -81,6 +81,17 @@ PP-OCRv6 is the newest PP-OCR generation. The flat ONNX files and dictionaries a
 | small | [`pp-ocrv6_small_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/pp-ocrv6_small_rec.onnx) | [`ppocrv6_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/ppocrv6_dict.txt) (18708 characters) | 20.2 MiB | [`PP-OCRv6_small_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_rec_onnx_infer.tar) |
 | medium | [`pp-ocrv6_medium_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/pp-ocrv6_medium_rec.onnx) | [`ppocrv6_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/ppocrv6_dict.txt) (18708 characters) | 73.0 MiB | [`PP-OCRv6_medium_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_medium_rec_onnx_infer.tar) |
 
+## OpenThai Text
+
+The [OpenThai2.0-OCR-Text v2.1 checkpoint](https://huggingface.co/iapp/OpenThai2.0-OCR-Text/tree/f5b8a1a3f807e26816af28e1f9f4789f7731a04d) shares the registered PP-OCRv6 Tiny detector. Its two f32 recognizers use the same 528-character Thai and English dictionary. The models and runtime are licensed under Apache-2.0.
+
+| File in the model directory | Registered filename | Bytes |
+|---|---|---:|
+| det.onnx | pp-ocrv6_tiny_det.onnx | 1,780,590 |
+| rec.onnx | openthai2_rec.onnx | 2,392,837 |
+| rec2.onnx | openthai2_rec2.onnx | 2,392,837 |
+| rec_dict.txt | openthai2_dict.txt | 1,783 |
+
 ## Character Dictionaries
 
 Character dictionaries are required for text recognition. Choose the appropriate dictionary for your model:

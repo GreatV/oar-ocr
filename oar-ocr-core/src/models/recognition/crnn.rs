@@ -423,3 +423,7 @@ impl Default for CRNNModelBuilder {
         Self::new()
     }
 }
+
+#[path = "crnn_frames.rs"]
+mod frames;
+pub use frames::{CtcDecoding, RecognitionPreprocessing};

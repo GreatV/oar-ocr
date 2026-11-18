@@ -69,6 +69,27 @@ impl OAROCRResult {
             .collect()
     }
 
+    /// Join recognized regions using a space within each row and a newline between distinct row IDs.
+    pub fn text_by_rows(&self, rows: &[usize]) -> Result<String, oar_ocr_core::core::OCRError> {
+        if rows.len() != self.text_regions.len() {
+            return Err(oar_ocr_core::core::OCRError::invalid_input(
+                "one row ID is required per text region",
+            ));
+        }
+        let mut text = String::new();
+        let mut last = None;
+        for (&row, region) in rows.iter().zip(&self.text_regions) {
+            if let Some(part) = &region.text {
+                if let Some(previous) = last {
+                    text.push(if row == previous { ' ' } else { '\n' });
+                }
+                text.push_str(part);
+                last = Some(row);
+            }
+        }
+        Ok(text)
+    }
+
     /// Returns all recognized text concatenated with the specified separator.
     pub fn concatenated_text(&self, separator: &str) -> String {
         self.all_text().join(separator)

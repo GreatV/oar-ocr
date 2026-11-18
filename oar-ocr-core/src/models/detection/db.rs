@@ -87,6 +87,26 @@ pub struct DBModelOutput {
     pub scores: Vec<Vec<f32>>,
 }
 
+/// Input resize and border policy for text detection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DetectionPreprocessing {
+    /// Use the resize and normalization settings of the DB model.
+    #[default]
+    Standard,
+    /// Add a white margin and scale the long side to the detection limit with a fourfold enlargement cap.
+    PaddedLongSide,
+}
+/// Polygon extraction policy for a DB probability map.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DbGeometry {
+    /// Use the configured Paddle DB postprocessor.
+    #[default]
+    Standard,
+    /// Score a rasterized quadrilateral and expand its truncated vertices with a round offset.
+    OpenCv,
+}
 /// Pure DB model implementation.
 ///
 /// This model implements the core DB architecture and can be configured
@@ -326,6 +346,99 @@ impl DBModel {
         self.forward_images(images, score_threshold, box_threshold, unclip_ratio)
     }
 
+    pub(crate) fn detect_with_geometry(
+        &self,
+        images: &[&RgbImage],
+        preprocessing: DetectionPreprocessing,
+        geometry: DbGeometry,
+        limit: u32,
+        config: &DBPostProcessConfig,
+    ) -> Result<DBModelOutput, OCRError> {
+        if preprocessing == DetectionPreprocessing::Standard && geometry == DbGeometry::Standard {
+            return self.forward_refs(
+                images,
+                config.thresh,
+                config.box_thresh,
+                config.unclip_ratio,
+            );
+        }
+        let mut output = DBModelOutput {
+            boxes: Vec::with_capacity(images.len()),
+            scores: Vec::with_capacity(images.len()),
+        };
+        for &img in images {
+            let (w, h) = img.dimensions();
+            if w == 0 || h == 0 {
+                return Err(OCRError::invalid_input("empty detector input"));
+            }
+            let (input, shapes, pad) = if preprocessing == DetectionPreprocessing::PaddedLongSide {
+                let pad = 8.max((w.min(h) as f64 * 0.05) as u32);
+                let make_size = |n: u32| {
+                    n.checked_add(2 * pad)
+                        .ok_or_else(|| OCRError::invalid_input("padded image dimensions overflow"))
+                };
+                let (pw, ph) = (make_size(w)?, make_size(h)?);
+                let mut padded = RgbImage::from_pixel(pw, ph, image::Rgb([255; 3]));
+                image::imageops::replace(&mut padded, img, pad as i64, pad as i64);
+                let scale = (f64::from(limit) / f64::from(pw.max(ph))).min(4.);
+                let scaled =
+                    |n: u32| ((f64::from(n) * scale / 32.).round_ties_even() as u32).max(1) * 32;
+                let (rw, rh) = (scaled(pw), scaled(ph));
+                let resized = crate::processors::raster::resize_rgb(&padded, rw, rh);
+                let input = ndarray::Array4::from_shape_fn(
+                    (1, 3, rh as usize, rw as usize),
+                    |(_, c, y, x)| {
+                        (resized[(x as u32, y as u32)][2 - c] as f32 / 255.
+                            - [0.485, 0.456, 0.406][c])
+                            / [0.229, 0.224, 0.225][c]
+                    },
+                );
+                (
+                    input,
+                    vec![ImageScaleInfo::new(
+                        ph as f32,
+                        pw as f32,
+                        rh as f32 / ph as f32,
+                        rw as f32 / pw as f32,
+                    )],
+                    pad,
+                )
+            } else {
+                let (input, shapes) = self.preprocess(vec![img.clone()])?;
+                (input, shapes, 0)
+            };
+            let prob = self.infer(&input)?;
+            let (boxes, scores) = if geometry == DbGeometry::OpenCv {
+                let (batch, channels, ph, pw) = prob.dim();
+                if batch != 1 || channels != 1 || pw == 0 || ph == 0 {
+                    return Err(OCRError::invalid_input(
+                        "DB expects a nonempty single-channel probability map",
+                    ));
+                }
+                self.postprocessor.opencv_quads(
+                    prob.as_slice()
+                        .ok_or_else(|| OCRError::invalid_input("noncontiguous detector output"))?,
+                    (pw, ph),
+                    (w, h),
+                    pad,
+                    config,
+                )
+            } else {
+                let (mut boxes, mut scores) = self.postprocessor.apply(&prob, shapes, Some(config));
+                let mut boxes = boxes.pop().unwrap_or_default();
+                for b in &mut boxes {
+                    for p in &mut b.points {
+                        p.x = (p.x - pad as f32).clamp(0., (w - 1) as f32);
+                        p.y = (p.y - pad as f32).clamp(0., (h - 1) as f32);
+                    }
+                }
+                (boxes, scores.pop().unwrap_or_default())
+            };
+            output.boxes.push(boxes);
+            output.scores.push(scores);
+        }
+        Ok(output)
+    }
     fn forward_images(
         &self,
         images: Vec<Cow<'_, RgbImage>>,

@@ -1103,3 +1103,21 @@ let det_config = TextDetectionConfig {
     ..Default::default()
 };
 ```
+
+## OpenThai Text
+
+The OpenThai v2.1 preset reads printed Thai and English. It detects lines, corrects page orientation and skew, and orders lines by column and row. The primary and secondary recognizers share a dictionary. Use `without_secondary_recognizer()` to read with the primary recognizer alone.
+
+```rust
+use oar_ocr::{oarocr::OAROCRBuilder, utils::load_image};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let reader = OAROCRBuilder::openthai_from_dir("checkpoints/OpenThai2.0-OCR-Text").build()?;
+    for (page, rows) in reader.predict_with_rows(vec![load_image("thai-page.png")?])? {
+        println!("{}", page.text_by_rows(&rows)?);
+    }
+    Ok(())
+}
+```
+
+Use `predict` for ordinary `OAROCRResult` pages. Use `predict_with_rows` to get the row IDs needed to join neighboring cells with spaces and distinct rows with newlines. With automatic model downloads enabled, use `OAROCRBuilder::openthai()` to resolve the registered filenames. [Model files](models.md#openthai-text)
