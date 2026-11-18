@@ -378,14 +378,14 @@ Chart-region recognition in `DocParser` is opt-in through `PaddleOcrVl::with_cha
 
 ```toml
 [dependencies]
-oar-ocr-vl = "0.10"
+oar-ocr-vl = "0.11"
 ```
 
 For GPU acceleration, enable CUDA:
 
 ```toml
 [dependencies]
-oar-ocr-vl = { version = "0.10", features = ["cuda"] }
+oar-ocr-vl = { version = "0.11", features = ["cuda"] }
 ```
 
 On macOS, use the `metal` feature instead.
