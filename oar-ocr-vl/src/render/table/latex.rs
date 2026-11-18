@@ -487,8 +487,45 @@ fn table(body: &str, headers: bool, columns: Option<usize>) -> Option<String> {
     Some(out)
 }
 
-/// Apply the checkpoint's header inference to literal HTML tables in the Markdown stream.
-pub(crate) fn promote_html_headers(text: &str) -> std::borrow::Cow<'_, str> {
+/// Render the prose between Markdown fences, copying fenced examples verbatim.
+fn outside_code_fences(text: &str, render: impl Fn(&str) -> String) -> String {
+    static FENCE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?m)^ {0,3}(`{3,}|~{3,})([^\n]*)").unwrap());
+    if !text.contains("```") && !text.contains("~~~") {
+        return render(text);
+    }
+    let mut output = String::new();
+    let mut start = 0;
+    let mut open = None;
+    for fence in FENCE.captures_iter(text) {
+        let line = fence.get(0).unwrap();
+        let marker = fence[1].as_bytes()[0];
+        let width = fence[1].len();
+        if let Some((kind, minimum)) = open {
+            if marker == kind && width >= minimum && fence[2].trim().is_empty() {
+                output.push_str(&text[start..line.end()]);
+                start = line.end();
+                open = None;
+            }
+        } else if marker != b'`' || !fence[2].contains('`') {
+            output.push_str(&render(&text[start..line.start()]));
+            start = line.start();
+            open = Some((marker, width));
+        }
+    }
+    if open.is_some() {
+        output.push_str(&text[start..]);
+    } else {
+        output.push_str(&render(&text[start..]));
+    }
+    output
+}
+
+pub(crate) fn promote_html_headers(text: &str) -> String {
+    outside_code_fences(text, |prose| infer_html_headers(prose).into_owned())
+}
+
+fn infer_html_headers(text: &str) -> std::borrow::Cow<'_, str> {
     static TABLE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(?is)<table\b[^>]*>.*?</table>").unwrap());
     static HEADER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)<th\b").unwrap());
@@ -536,8 +573,12 @@ pub(crate) fn promote_html_headers(text: &str) -> std::borrow::Cow<'_, str> {
 }
 
 pub(crate) fn to_html(text: &str, infer_headers: bool) -> String {
+    outside_code_fences(text, |prose| convert_tables(prose, infer_headers))
+}
+
+fn convert_tables(text: &str, infer_headers: bool) -> String {
     let text = if infer_headers {
-        promote_html_headers(text)
+        infer_html_headers(text)
     } else {
         std::borrow::Cow::Borrowed(text)
     };

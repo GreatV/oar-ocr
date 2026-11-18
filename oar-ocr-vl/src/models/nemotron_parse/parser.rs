@@ -75,13 +75,16 @@ pub(super) fn parse(raw: String, completion: &str) -> PageDocument {
         let literal = normalize_printed_text(class, body).replace("<tbc>", "");
         let value = literal.trim();
         let markdown = match class {
-            "Title" if !value.is_empty() && !value.starts_with('#') => format!("# {value}"),
+            "Title" if !value.is_empty() && !value.starts_with('#') => {
+                format!("# {}", latex::promote_html_headers(value))
+            }
             "Section-header" if !value.is_empty() && !value.starts_with('#') => {
-                format!("## {value}")
+                format!("## {}", latex::promote_html_headers(value))
             }
             "Table" => latex::to_html(value, true),
             "Chart" => native_chart::render(value, None),
-            _ => value.to_owned(),
+            "Code" => value.to_owned(),
+            _ => latex::promote_html_headers(value),
         };
         fragments.push(markdown);
         context.push(native_chart::Region {
@@ -112,7 +115,7 @@ pub(super) fn parse(raw: String, completion: &str) -> PageDocument {
             .collect::<Vec<_>>()
             .join("\n\n")
     };
-    page.markdown = Some(latex::promote_html_headers(&markdown).into_owned());
+    page.markdown = Some(markdown);
     page.raw_output = Some(raw);
     page
 }
@@ -121,6 +124,29 @@ pub(super) fn parse(raw: String, completion: &str) -> PageDocument {
 mod tests {
     use super::*;
     use crate::nemotron_parse::PROMPT;
+
+    #[test]
+    fn header_promotion_preserves_code_examples() {
+        let table = "<table><tr><td><b>Name</b></td><td><b>Count</b></td></tr><tr><td>A</td><td>1</td></tr></table>";
+        let promoted = table
+            .replace("<td><b>", "<th><b>")
+            .replace("</b></td>", "</b></th>");
+        let fenced = format!("```html\n{table}\n```");
+        let block = |body: &str, class: &str| format!("<x_0><y_0>{body}<x_1><y_1><class_{class}>");
+        let prose = format!("{fenced}\n{table}");
+        let completion = [
+            block(&fenced, "Code"),
+            block(table, "Code"),
+            block(&prose, "Text"),
+        ]
+        .concat();
+        let page = parse(format!("{PROMPT}{completion}</s>"), &completion);
+        assert_eq!(page.blocks[0].content.as_deref(), Some(fenced.as_str()));
+        assert_eq!(
+            page.markdown.unwrap(),
+            format!("{fenced}\n\n{table}\n\n{fenced}\n{promoted}")
+        );
+    }
 
     #[test]
     fn empty_completion_renders_empty_markdown() {
