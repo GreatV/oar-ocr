@@ -83,6 +83,7 @@ pub(super) fn parse(raw: String, completion: &str) -> PageDocument {
             }
             "Table" => latex::to_html(value, true),
             "Chart" => native_chart::render(value, None),
+            // The reference promotes headers across the whole page. Skip Code blocks to preserve examples.
             "Code" => value.to_owned(),
             _ => latex::promote_html_headers(value),
         };
@@ -101,6 +102,7 @@ pub(super) fn parse(raw: String, completion: &str) -> PageDocument {
     }
     native_chart::relocate(&context, &mut fragments);
     let markdown = if page.blocks.is_empty() {
+        // Infer headers in the unstructured text while preserving fenced examples.
         latex::to_html(
             MARKERS
                 .replace_all(&completion, "")
@@ -146,6 +148,9 @@ mod tests {
             page.markdown.unwrap(),
             format!("{fenced}\n\n{table}\n\n{fenced}\n{promoted}")
         );
+        let fallback = parse(format!("{PROMPT}{prose}</s>"), &prose);
+        assert!(fallback.blocks.is_empty());
+        assert_eq!(fallback.markdown.unwrap(), format!("{fenced}\n{promoted}"));
     }
 
     #[test]
