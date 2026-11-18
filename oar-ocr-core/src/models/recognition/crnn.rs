@@ -277,7 +277,7 @@ impl CRNNModel {
         if self
             .cuda_reducer
             .allows(batch_tensor.shape()[0], batch_tensor.shape()[3])
-            && let Some(predictions) = self.inference.infer_cuda_output(&inputs)?
+            && let Some(predictions) = self.inference.infer_cuda_output(&batch_tensor)?
         {
             let reduced = self.cuda_reducer.reduce(
                 &predictions,

@@ -97,7 +97,7 @@ impl CtcReducer {
             .map_err(|_| ort::Error::new("CTC reducer lock poisoned"))?;
         if guard.is_none() {
             *guard = Some(
-                Session::builder()?
+                Session::builder(&crate::core::inference::initialize_ort_environment()?)?
                     .with_intra_threads(1)?
                     .with_inter_threads(1)?
                     .with_execution_providers([ep::CUDA::default()
@@ -185,8 +185,12 @@ mod tests {
     #[test]
     fn cuda_ctc_reduction_matches_host_bits() -> ort::Result<()> {
         use ort::ep::ExecutionProvider;
-        let mut builder = Session::builder()?;
-        if ep::CUDA::default().register(&mut builder).is_err() || ep::get_gpu_device().is_err() {
+        let env = crate::core::inference::initialize_ort_environment()?;
+        let mut builder = Session::builder(&env)?;
+        let probe = Tensor::from_array(([1], vec![0.0_f32]))?;
+        if ep::CUDA::default().register(&mut builder).is_err()
+            || probe.to(AllocationDevice::CUDA, 0).is_err()
+        {
             eprintln!("skipping CUDA CTC parity: no CUDA device");
             return Ok(());
         }

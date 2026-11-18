@@ -2,53 +2,90 @@
 
 use ort::environment::{Environment, EnvironmentBuilder};
 use ort::logging::LogLevel;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
-struct EnvironmentState {
-    pending: bool,
-    owned: bool,
-    log_level: LogLevel,
+struct InstalledEnvironment {
+    env: Environment,
+    // Application-owned environments retain their application's logging policy.
+    owned_log_level: Option<LogLevel>,
 }
 
-// Retain ownership if native environment creation fails, so a retry still
-// applies our logging default. The lock covers commit, creation, and setup.
-static ENVIRONMENT_STATE: Mutex<EnvironmentState> = Mutex::new(EnvironmentState {
-    pending: false,
-    owned: false,
-    log_level: LogLevel::Error,
-});
+#[derive(Debug, thiserror::Error)]
+#[error("{0}. Pass the existing handle to set_ort_environment before creating OAR sessions")]
+struct UninstalledEnvironment(#[source] ort::Error);
 
-/// Initializes ONNX Runtime with Error logging if no environment is configured.
+impl InstalledEnvironment {
+    fn build(builder: EnvironmentBuilder) -> ort::Result<Self> {
+        let env = builder.build().map_err(|error| {
+            if error.message() == "only one environment is allowed per process" {
+                ort::Error::wrap(UninstalledEnvironment(error))
+            } else {
+                error
+            }
+        })?;
+        env.set_log_level(LogLevel::Error);
+        Ok(Self {
+            env,
+            owned_log_level: Some(LogLevel::Error),
+        })
+    }
+}
+
+fn state() -> ort::Result<MutexGuard<'static, Option<InstalledEnvironment>>> {
+    static STATE: Mutex<Option<InstalledEnvironment>> = Mutex::new(None);
+    STATE
+        .lock()
+        .map_err(|_| ort::Error::new("ONNX Runtime environment initialization lock poisoned"))
+}
+
+/// Returns the shared ORT environment, creating it with Error logging on first use.
 ///
-/// Returns `true` when this call commits the default configuration. An existing
-/// configuration, including one implicitly created by ONNX Runtime, is retained.
-/// Applications that configure ONNX Runtime themselves should do so before this
-/// function or any OAR model construction.
-pub fn initialize_ort_environment() -> ort::Result<bool> {
-    commit_environment(ort::init())
+/// Applications that build an environment themselves should first call [`set_ort_environment`].
+pub fn initialize_ort_environment() -> ort::Result<Environment> {
+    let mut state = state()?;
+    let installed = match state.as_ref() {
+        Some(installed) => installed,
+        None => state.insert(InstalledEnvironment::build(ort::init())?),
+    };
+    Ok(installed.env.clone())
+}
+
+/// Installs an application-built ORT environment before device probing or model construction.
+///
+/// OAR retains the handle and preserves the application's logging policy. Returns an error
+/// if an environment was already installed or initialized by OAR.
+pub fn set_ort_environment(env: Environment) -> ort::Result<()> {
+    let mut state = state()?;
+    if state.is_some() {
+        return Err(ort::Error::new(
+            "OAR already has an ONNX Runtime environment",
+        ));
+    }
+    *state = Some(InstalledEnvironment {
+        env,
+        owned_log_level: None,
+    });
+    Ok(())
 }
 
 pub(super) fn commit_environment(builder: EnvironmentBuilder) -> ort::Result<bool> {
-    let mut state = ENVIRONMENT_STATE
-        .lock()
-        .map_err(|_| ort::Error::new("ONNX Runtime environment initialization lock poisoned"))?;
-    let committed = builder.commit();
-    state.pending |= committed;
-    state.owned |= committed;
-    if state.pending {
-        Environment::current()?.set_log_level(state.log_level);
-        state.pending = false;
+    let mut state = state()?;
+    if state.is_some() {
+        return Ok(false);
     }
-    Ok(committed)
+    *state = Some(InstalledEnvironment::build(builder)?);
+    Ok(true)
 }
 
 pub(super) fn lower_owned_environment_log_level(level: LogLevel) -> ort::Result<()> {
-    let mut state = ENVIRONMENT_STATE
-        .lock()
-        .map_err(|_| ort::Error::new("ONNX Runtime environment initialization lock poisoned"))?;
-    if state.owned && level < state.log_level {
-        Environment::current()?.set_log_level(level);
-        state.log_level = level;
+    if let Some(InstalledEnvironment {
+        env,
+        owned_log_level: Some(previous),
+    }) = state()?.as_mut()
+        && level < *previous
+    {
+        env.set_log_level(level);
+        *previous = level;
     }
     Ok(())
 }

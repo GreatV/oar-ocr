@@ -68,7 +68,7 @@ impl OrtInfer {
     #[cfg(feature = "cuda")]
     pub(crate) fn infer_cuda_output(
         &self,
-        inputs: &[(&str, TensorInput)],
+        batch: &ndarray::Array4<f32>,
     ) -> Result<Option<ort::value::Tensor<f32>>, OCRError> {
         let Some(device) = self.cuda_device else {
             return Ok(None);
@@ -84,15 +84,10 @@ impl OrtInfer {
             use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
             let name = session.outputs()[0].name().to_owned();
             let mut binding = session.create_binding()?;
-            // Keep borrowed host buffers alive through input synchronization/run.
-            let tensors = inputs
-                .iter()
-                .map(|(_, input)| input.to_tensor_ref())
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| ort::Error::new(e.to_string()))?;
-            for ((name, _), tensor) in inputs.iter().zip(&tensors) {
-                binding.bind_input(*name, tensor)?;
-            }
+            // rc.15 binds borrowed host data through an identity session that can recursively clone the input.
+            // Give the binding its own input buffer and retain the original batch for a CPU-output retry.
+            let input = ort::value::Tensor::from_array(batch.clone())?;
+            binding.bind_input(self.input_name(), &input)?;
             let memory = MemoryInfo::new(
                 AllocationDevice::CUDA,
                 device,

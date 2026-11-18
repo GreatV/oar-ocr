@@ -232,7 +232,7 @@ impl Pipeline {
 }
 
 fn ort_config(case: &Case) -> Result<OrtSessionConfig> {
-    initialize_ort_environment()?;
+    let _environment = initialize_ort_environment()?;
     if case.device == "auto" {
         return Ok(OrtSessionConfig::auto()
             .with_intra_threads(case.options.cpu_threads())
@@ -283,7 +283,7 @@ fn ort_config(case: &Case) -> Result<OrtSessionConfig> {
             value => bail!("device {value} requires its matching accelerator feature and platform"),
         };
         // A benchmark must not silently label a CPU fallback as an accelerator run.
-        let builder = ort::session::Session::builder()?
+        let builder = ort::session::Session::builder(&_environment)?
             .with_intra_threads(1)
             .map_err(ort::Error::<()>::from)?;
         builder

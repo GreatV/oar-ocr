@@ -501,7 +501,7 @@ fn ort_device(device: &str, verbose: bool) -> Result<OrtSessionConfig> {
 
 #[cfg(any(feature = "cuda", feature = "metal", feature = "coreml"))]
 fn probe_classic_device(device: &str) -> Result<()> {
-    oar_ocr::core::inference::initialize_ort_environment()?;
+    let environment = oar_ocr::core::inference::initialize_ort_environment()?;
     let provider = match device {
         #[cfg(feature = "cuda")]
         cuda if cuda.starts_with("cuda:") => ort::ep::CUDA::default()
@@ -512,7 +512,7 @@ fn probe_classic_device(device: &str) -> Result<()> {
         "metal" => ort::ep::CoreML::default().build().error_on_failure(),
         _ => bail!("device requires its corresponding accelerator feature"),
     };
-    let builder = ort::session::Session::builder()?
+    let builder = ort::session::Session::builder(&environment)?
         .with_intra_threads(1)
         .map_err(ort::Error::<()>::from)?;
     builder
