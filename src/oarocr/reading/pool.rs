@@ -164,10 +164,10 @@ impl OAROCR {
                 let crops = match self.stages.crop_strategy {
                     CropStrategy::Standard => TextCroppingProcessor::new(true)
                         .process((Arc::clone(image), boxes.to_vec()))?,
-                    CropStrategy::PerspectiveCubic => boxes
+                    CropStrategy::PerspectiveCubic | CropStrategy::UprightCubic => boxes
                         .iter()
-                        .map(|b| Some(Arc::new(geometry::crop(image, &quad(b)))))
-                        .collect(),
+                        .map(|b| self.crop_line(image, &quad(b)).map(|c| Some(Arc::new(c))))
+                        .collect::<Result<_, _>>()?,
                 };
                 let (indices, mut valid): (Vec<_>, Vec<_>) = crops
                     .into_iter()
@@ -226,6 +226,7 @@ impl OAROCR {
                             .as_deref()
                             .is_some_and(|s| s.eq_ignore_ascii_case("seal")),
                     ),
+                    ReadingOrder::Detector => (0..polygons.len()).map(|i| vec![i]).collect(),
                 };
                 PageRead {
                     polygons,

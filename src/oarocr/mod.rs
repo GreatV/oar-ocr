@@ -18,6 +18,7 @@ pub mod result;
 pub mod stitching;
 pub mod structure;
 pub(crate) mod table_analyzer;
+mod text_layout;
 
 pub use ocr::*;
 pub use processors::*;

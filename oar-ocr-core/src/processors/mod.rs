@@ -74,5 +74,6 @@ pub use uvdoc_postprocess::*;
 
 mod ctc_frames;
 mod db_opencv;
+pub(crate) mod line_kernels;
 pub mod raster;
 pub use ctc_frames::{CtcFrame, CtcReading};

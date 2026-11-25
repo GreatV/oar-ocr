@@ -512,4 +512,5 @@ mod tests {
     }
 }
 
+pub(crate) mod scripts;
 pub(crate) mod thai;

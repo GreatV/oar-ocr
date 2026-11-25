@@ -1,15 +1,17 @@
 //! Page-level OCR stages that use recognition evidence for orientation, rereads, and reading order.
 mod geometry;
+mod lines;
 mod marks;
 pub(super) mod options;
 mod order;
 mod pool;
 mod recognition;
+pub(super) mod scripts;
 use super::{
     CropStrategy, CtcDecoding, DbGeometry, OAROCR, PageOrientation, ReadingOrder,
     RecognitionPreprocessing, SecondaryRouting, TextPostprocessing,
 };
-use crate::oarocr::{TextRegion, processors::thai as text};
+use crate::oarocr::{TextRegion, processors::scripts::is_junk, processors::thai as text};
 use geometry::{Quad, Transform};
 use image::{RgbImage, imageops};
 use oar_ocr_core::{
@@ -17,6 +19,9 @@ use oar_ocr_core::{
     processors::{BoundingBox, CtcFrame, Point as BoxPoint},
 };
 use std::sync::Arc;
+/// Label of a region read from a faint short-token candidate.
+pub(in crate::oarocr) const FAINT_LABEL: &str = "faint";
+
 fn box_from_pixels(points: [[f64; 2]; 4]) -> BoundingBox {
     BoundingBox::new(
         points
@@ -43,6 +48,8 @@ struct Reading {
     confidence: f64,
     frames: Option<Vec<CtcFrame>>,
     orientation: Option<f32>,
+    /// Read from a region the detector scored under its threshold.
+    faint: bool,
 }
 pub(super) struct PageRead {
     polygons: Vec<BoundingBox>,
@@ -134,6 +141,7 @@ impl OAROCR {
         &self,
         original: &Arc<RgbImage>,
         initial: Vec<BoundingBox>,
+        mut faint: Vec<BoundingBox>,
     ) -> Result<(Vec<TextRegion>, Vec<usize>, u16), OCRError> {
         let mut img = original.clone();
         let (width, height) = img.dimensions();
@@ -155,6 +163,22 @@ impl OAROCR {
                 img = Arc::new(imageops::rotate270(img.as_ref()));
             }
             boxes = self.detect_text_boxes(&img)?;
+            // Faint candidates belong to the image they were detected in.
+            faint.clear();
+        }
+        if self.stages.page_orientation == PageOrientation::LineShapes
+            && lines::looks_sideways(&quads(&boxes))
+        {
+            let turned = Arc::new(imageops::rotate270(img.as_ref()));
+            let turned_boxes = self.detect_text_boxes(&turned)?;
+            if lines::long_lines(&quads(&turned_boxes)) > 2 * lines::long_lines(&quads(&boxes)) + 5
+            {
+                forward = Transform::new(0., 1., 0., -1., 0., (width - 1) as f64, 0., 0., 1.);
+                img = turned;
+                boxes = turned_boxes;
+                faint.clear();
+                rotation = 270;
+            }
         }
         let skew = geometry::skew(&quads(&boxes));
         if self
@@ -166,8 +190,30 @@ impl OAROCR {
             img = Arc::new(upright);
             forward = m * forward;
             boxes = self.detect_text_boxes(&img)?;
+            faint.clear();
         }
-        let mut page = self.read_page(&img, boxes)?;
+        if self.stages.split_column_gutters {
+            boxes = lines::split_gutters(&img, &quads(&boxes))
+                .iter()
+                .map(as_bbox)
+                .collect();
+        }
+        let mut page = if let Some(scripts) = &self.pipeline.scripts {
+            let (mut page, upside_down) = self.read_script_page(scripts, &img, boxes, faint)?;
+            if upside_down {
+                // Corners run in reading order, so an upside-down line starts at its bottom-right.
+                for (polygon, q) in page.polygons.iter_mut().zip(&mut page.boxes) {
+                    if polygon.points.len() == 4 {
+                        polygon.points.rotate_left(2);
+                    }
+                    q.rotate_left(2);
+                }
+                rotation = (rotation + 180) % 360;
+            }
+            page
+        } else {
+            self.read_page(&img, boxes)?
+        };
         if vote && rotation == 0 && self.upside_down(&img, &page)? {
             forward = Transform::new(
                 -1.,
@@ -203,6 +249,8 @@ impl OAROCR {
             vec![false; page.boxes.len()]
         };
         let normal = geometry::line_height(&page.boxes);
+        // Script-routed pages drop detector false positives instead of returning them empty.
+        let drop_junk = self.pipeline.scripts.is_some();
         let mut regions = Vec::new();
         let mut row_ids = Vec::new();
         for (row, ids) in page.rows.into_iter().enumerate() {
@@ -227,6 +275,9 @@ impl OAROCR {
                     )
                     .is_some()
                 {
+                    continue;
+                }
+                if drop_junk && (value.trim().is_empty() || is_junk(&value, r.confidence as f32)) {
                     continue;
                 }
                 let polygon = &page.polygons[i];
@@ -265,7 +316,7 @@ impl OAROCR {
                 }
                 regions.push(region);
                 row_ids.push(match self.stages.reading_order {
-                    ReadingOrder::Standard => row_ids.len(),
+                    ReadingOrder::Standard | ReadingOrder::Detector => row_ids.len(),
                     ReadingOrder::TextColumns => row,
                 });
             }
@@ -298,6 +349,9 @@ impl Reading {
             region.confidence = Some(self.confidence as f32);
             region.rec_poly = Some(bbox);
             region.orientation_angle = self.orientation;
+            if self.faint {
+                region.label = Some(FAINT_LABEL.into());
+            }
         }
         region
     }

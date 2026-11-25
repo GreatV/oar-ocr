@@ -96,6 +96,8 @@ pub enum DetectionPreprocessing {
     Standard,
     /// Add a white margin and scale the long side to the detection limit with a fourfold enlargement cap.
     PaddedLongSide,
+    /// Shrink the long side to the detection limit by area averaging and scale RGB values to [-1, 1].
+    AreaLongSide,
 }
 /// Polygon extraction policy for a DB probability map.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -106,6 +108,10 @@ pub enum DbGeometry {
     Standard,
     /// Score a rasterized quadrilateral and expand its truncated vertices with a round offset.
     OpenCv,
+    /// Grow each connected component of a shrunk-kernel map back into a line box and join collinear boxes.
+    ///
+    /// The score threshold binarizes the map and the box threshold is the least mean probability of a component. The unclip ratio and candidate limit are not used.
+    LineKernels,
 }
 /// Pure DB model implementation.
 ///
@@ -346,6 +352,7 @@ impl DBModel {
         self.forward_images(images, score_threshold, box_threshold, unclip_ratio)
     }
 
+    /// Detect with the selected policies. With `with_faint`, also return each image's faint short-token candidates, which only [`DbGeometry::LineKernels`] finds.
     pub(crate) fn detect_with_geometry(
         &self,
         images: &[&RgbImage],
@@ -353,19 +360,22 @@ impl DBModel {
         geometry: DbGeometry,
         limit: u32,
         config: &DBPostProcessConfig,
-    ) -> Result<DBModelOutput, OCRError> {
+        with_faint: bool,
+    ) -> Result<(DBModelOutput, Vec<Vec<BoundingBox>>), OCRError> {
         if preprocessing == DetectionPreprocessing::Standard && geometry == DbGeometry::Standard {
-            return self.forward_refs(
+            let output = self.forward_refs(
                 images,
                 config.thresh,
                 config.box_thresh,
                 config.unclip_ratio,
-            );
+            )?;
+            return Ok((output, vec![Vec::new(); images.len()]));
         }
         let mut output = DBModelOutput {
             boxes: Vec::with_capacity(images.len()),
             scores: Vec::with_capacity(images.len()),
         };
+        let mut faint = Vec::with_capacity(images.len());
         for &img in images {
             let (w, h) = img.dimensions();
             if w == 0 || h == 0 {
@@ -403,26 +413,65 @@ impl DBModel {
                     )],
                     pad,
                 )
+            } else if preprocessing == DetectionPreprocessing::AreaLongSide {
+                let scale = (f64::from(limit) / f64::from(w.max(h))).min(1.);
+                let scaled =
+                    |n: u32| ((f64::from(n) * scale / 32.).round_ties_even() as u32).max(1) * 32;
+                let (rw, rh) = (scaled(w), scaled(h));
+                let resized = crate::processors::raster::scalar::resize(
+                    img,
+                    rw,
+                    rh,
+                    crate::processors::raster::Interp::Area,
+                );
+                let input = ndarray::Array4::from_shape_fn(
+                    (1, 3, rh as usize, rw as usize),
+                    |(_, c, y, x)| resized[(x as u32, y as u32)][c] as f32 / 127.5 - 1.,
+                );
+                (
+                    input,
+                    vec![ImageScaleInfo::new(
+                        h as f32,
+                        w as f32,
+                        rh as f32 / h as f32,
+                        rw as f32 / w as f32,
+                    )],
+                    0,
+                )
             } else {
                 let (input, shapes) = self.preprocess(vec![img.clone()])?;
                 (input, shapes, 0)
             };
             let prob = self.infer(&input)?;
-            let (boxes, scores) = if geometry == DbGeometry::OpenCv {
-                let (batch, channels, ph, pw) = prob.dim();
+            let (batch, channels, ph, pw) = prob.dim();
+            let single_map = || {
                 if batch != 1 || channels != 1 || pw == 0 || ph == 0 {
                     return Err(OCRError::invalid_input(
                         "DB expects a nonempty single-channel probability map",
                     ));
                 }
-                self.postprocessor.opencv_quads(
-                    prob.as_slice()
-                        .ok_or_else(|| OCRError::invalid_input("noncontiguous detector output"))?,
-                    (pw, ph),
-                    (w, h),
-                    pad,
-                    config,
-                )
+                prob.as_slice()
+                    .ok_or_else(|| OCRError::invalid_input("noncontiguous detector output"))
+            };
+            let mut tokens = Vec::new();
+            let (boxes, scores) = if geometry == DbGeometry::OpenCv {
+                self.postprocessor
+                    .opencv_quads(single_map()?, (pw, ph), (w, h), pad, config)
+            } else if geometry == DbGeometry::LineKernels {
+                let found = crate::processors::line_kernels::detect(
+                    single_map()?,
+                    &crate::processors::line_kernels::MapGeometry {
+                        map: (pw, ph),
+                        input: (input.dim().3, input.dim().2),
+                        source: (w, h),
+                        pad,
+                    },
+                    config.thresh,
+                    config.box_thresh,
+                    with_faint,
+                );
+                tokens = found.faint;
+                (found.lines, found.scores)
             } else {
                 let (mut boxes, mut scores) = self.postprocessor.apply(&prob, shapes, Some(config));
                 let mut boxes = boxes.pop().unwrap_or_default();
@@ -436,8 +485,9 @@ impl DBModel {
             };
             output.boxes.push(boxes);
             output.scores.push(scores);
+            faint.push(tokens);
         }
-        Ok(output)
+        Ok((output, faint))
     }
     fn forward_images(
         &self,

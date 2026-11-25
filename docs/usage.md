@@ -1130,6 +1130,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Use `predict` for ordinary `OAROCRResult` pages. Use `predict_with_rows` to get the row IDs needed to join neighboring cells with spaces and distinct rows with newlines. With automatic model downloads enabled, use `OAROCRBuilder::openthai()` to resolve the registered filenames. [Model files](models.md#openthai-text)
 
+## OCRia-nano-1
+
+The OCRia-nano-1 preset reads pages in Latin, CJK, right-to-left and about 17 other scripts on CPU. It detects lines, turns sideways and upside-down pages, cuts boxes at column gutters, and routes each line to one of four recognizers. Lines come back in the detector's order, top to bottom in 8-pixel bands. Download the [model files](models.md#ocria-nano-1) first; their license restricts commercial use.
+
+```rust
+use oar_ocr::{oarocr::OAROCRBuilder, utils::load_image};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let reader = OAROCRBuilder::ocria_nano_from_dir("checkpoints/OCRia-nano-1").build()?;
+    let page = reader.predict(vec![load_image("page.png")?])?.remove(0);
+    println!("{}", page.concatenated_text("\n"));
+    Ok(())
+}
+```
+
+The preset is a set of ordinary builder options, so a stage can be turned off: `split_column_gutters(false)`, `read_faint_tokens(false)`, or `page_orientation(PageOrientation::Standard)` for pages known to be upright. Recognition runs 32 lines per batch, each batch padded to its widest line. A line's reading depends on that padded width, so another `region_batch_size` can change some readings. The models are built for CPU, and the Latin recognizer is int8. The preset also runs on CUDA, where 2% of the lines on 62 test pages read differently from CPU.
+
+`OARStructureBuilder::ocria_nano_from_dir` runs the same OCR and then LayoutNet, which groups the recognized lines into headings, paragraphs, lists, captions, page headers and footers, and tables with header rows and spanning cells. The result is an ordinary `StructureResult`.
+
+```rust
+use oar_ocr::oarocr::OARStructureBuilder;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let structure = OARStructureBuilder::ocria_nano_from_dir("checkpoints/OCRia-nano-1").build()?;
+    let page = structure.predict("page.png")?;
+    println!("{}", page.to_markdown());
+    Ok(())
+}
+```
+
+LayoutNet does not read the OCR lines directly. As in LiteParse, which this model ships with, the lines are first projected onto the page grid: neighbours on a line are joined, lines are grouped into blocks and XY-cut regions, and each item records the alignment signals the model was trained with. LayoutNet measures the page in points, so a page image is taken to be a 150 dpi scan, as LiteParse takes images without resolution metadata. LiteParse also re-renders image inputs at 250 dpi before OCR; OAR reads the image as given, so the two can recognize different lines on the same page.
+
 ## OpenThai Markdown and Nemotron Parse
 
 Run single-pass document parsing with the checkpoint's repository ID. Each result contains the generated token stream, ordered blocks with content-normalized boxes, rendered Markdown and table conversion diagnostics. Native tables render as HTML so merged cells retain their row and column spans.

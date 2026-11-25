@@ -6,5 +6,6 @@
 
 pub mod classification;
 pub mod detection;
+pub mod layout_net;
 pub mod recognition;
 pub mod rectification;

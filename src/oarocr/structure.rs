@@ -130,6 +130,8 @@ pub struct OARStructureBuilder {
     // Required models
     layout_detection_model: ModelSource,
     layout_model_name: Option<String>,
+    // Directory of an OCR preset whose lines the layout model reads (OCRia-nano-1).
+    text_layout_dir: Option<PathBuf>,
 
     // Optional document preprocessing
     document_orientation_model: Option<ModelSource>,
@@ -270,6 +272,7 @@ impl OARStructureBuilder {
         Self {
             layout_detection_model: layout_detection_model.into(),
             layout_model_name: None,
+            text_layout_dir: None,
             document_orientation_model: None,
             document_rectification_model: None,
             region_detection_model: None,
@@ -357,6 +360,26 @@ impl OARStructureBuilder {
             .with_wireless_table_structure("slanet_plus.onnx")
             .with_wired_table_cell_detection("rt-detr-l_wired_table_cell_det.onnx")
             .table_structure_dict_path("table_structure_dict_ch.txt")
+    }
+
+    /// Load the OCRia-nano-1 preset from the upstream file names in a local directory.
+    ///
+    /// OCR runs first, as [`OAROCRBuilder::ocria_nano_from_dir`](super::OAROCRBuilder::ocria_nano_from_dir) sets it up. LayoutNet (`tablenet.onnx`) then groups the recognized lines into layout blocks and tables, treating the page as a 150 dpi scan. Of the builder's options only [`ort_session`](Self::ort_session) applies.
+    ///
+    /// ```no_run
+    /// use oar_ocr::oarocr::OARStructureBuilder;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let structure = OARStructureBuilder::ocria_nano_from_dir("models/OCRia-nano-1").build()?;
+    /// # let _ = structure;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn ocria_nano_from_dir(dir: impl AsRef<std::path::Path>) -> Self {
+        let dir = dir.as_ref();
+        let mut builder = Self::new(dir.join("tablenet.onnx"));
+        builder.text_layout_dir = Some(dir.to_path_buf());
+        builder
     }
 
     /// Sets the ONNX Runtime session configuration.
@@ -805,6 +828,25 @@ impl OARStructureBuilder {
     ///
     /// This method instantiates all adapters and returns a ready-to-use structure analyzer.
     pub fn build(mut self) -> Result<OARStructure, OCRError> {
+        if let Some(dir) = &self.text_layout_dir {
+            let mut ocr = super::ocr::OAROCRBuilder::ocria_nano_from_dir(dir);
+            if let Some(config) = &self.ort_session_config {
+                ocr = ocr.ort_session(config.clone());
+            }
+            let layout_net = oar_ocr_core::models::layout_net::LayoutNetModel::new(
+                resolve_model_source(&self.layout_detection_model)?,
+                self.ort_session_config
+                    .clone()
+                    .map(OrtSessionConfig::resolve_auto),
+            )?;
+            let structure = super::text_layout::TextLayoutStructure {
+                ocr: ocr.build()?,
+                layout_net,
+            };
+            return Ok(OARStructure {
+                inner: StructureKind::TextLayout(Box::new(structure)),
+            });
+        }
         for config in [
             self.ort_session_config.as_mut(),
             self.formula_ort_session_config.as_mut(),
@@ -1483,7 +1525,9 @@ impl OARStructureBuilder {
             region_batch_size: self.region_batch_size,
         };
 
-        Ok(OARStructure { pipeline })
+        Ok(OARStructure {
+            inner: StructureKind::Detection(Box::new(DetectionStructure { pipeline })),
+        })
     }
 
     fn validate_batch_size(field: &str, size: usize) -> Result<(), OCRError> {
@@ -1505,11 +1549,86 @@ impl OARStructureBuilder {
 /// This struct represents a configured and ready-to-use document structure analyzer.
 #[derive(Debug)]
 pub struct OARStructure {
+    inner: StructureKind,
+}
+
+#[derive(Debug)]
+enum StructureKind {
+    /// Layout detection on the page image, then OCR and table models per region.
+    Detection(Box<DetectionStructure>),
+    /// OCR first, then a layout model over the recognized lines.
+    TextLayout(Box<super::text_layout::TextLayoutStructure>),
+}
+
+impl OARStructure {
+    /// Analyzes the structure of a document image from a path.
+    ///
+    /// # Arguments
+    ///
+    /// * `image_path` - Path to the input image
+    ///
+    /// # Returns
+    ///
+    /// A `StructureResult` containing detected layout elements, tables, formulas, and text.
+    pub fn predict(&self, image_path: impl Into<PathBuf>) -> Result<StructureResult, OCRError> {
+        let image_path = image_path.into();
+        let image = image::open(&image_path).map_err(|e| OCRError::InvalidInput {
+            message: format!(
+                "failed to load image from '{}': {}",
+                image_path.display(),
+                e
+            ),
+        })?;
+        let mut result = self.predict_image(image.to_rgb8())?;
+        result.input_path = std::sync::Arc::from(image_path.to_string_lossy().as_ref());
+        Ok(result)
+    }
+
+    /// Analyzes the structure of a single document image.
+    pub fn predict_image(&self, image: image::RgbImage) -> Result<StructureResult, OCRError> {
+        match &self.inner {
+            StructureKind::Detection(structure) => structure.predict_image(image),
+            StructureKind::TextLayout(structure) => structure.predict_image(image),
+        }
+    }
+
+    /// Analyzes multiple document page images with configured batching.
+    ///
+    /// Image-level stages are chunked according to `image_batch_size` when
+    /// configured, otherwise the layout adapter's recommended batch size is used.
+    /// OCR recognition crops are aggregated across the full input set and split
+    /// according to `region_batch_size` when configured. The OCRia-nano-1 preset
+    /// reads pages one at a time.
+    ///
+    /// Per-page errors are returned individually so that a failure on one page does
+    /// not abort the remaining pages.
+    pub fn predict_images(
+        &self,
+        images: Vec<image::RgbImage>,
+    ) -> Vec<Result<StructureResult, OCRError>> {
+        match &self.inner {
+            StructureKind::Detection(structure) => structure.predict_images(images),
+            StructureKind::TextLayout(structure) => images
+                .into_iter()
+                .enumerate()
+                .map(|(index, image)| {
+                    let mut result = structure.predict_image(image)?;
+                    result.index = index;
+                    Ok(result)
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The detection-first structure pipeline.
+#[derive(Debug)]
+struct DetectionStructure {
     pipeline: StructurePipeline,
 }
 
 /// Intermediate result from preprocessing and layout detection for a single page.
-/// Produced by `OARStructure::prepare_page` and consumed by `complete_page`.
+/// Produced by `DetectionStructure::prepare_page` and consumed by `complete_page`.
 struct PreparedPage {
     current_image: std::sync::Arc<image::RgbImage>,
     orientation_angle: Option<f32>,
@@ -1520,7 +1639,7 @@ struct PreparedPage {
     precomputed_text_regions: Option<Vec<crate::oarocr::TextRegion>>,
 }
 
-impl OARStructure {
+impl DetectionStructure {
     fn finish_layout_elements(layout_elements: &mut Vec<crate::domain::structure::LayoutElement>) {
         if layout_elements.len() > 1 {
             let removed = crate::domain::structure::remove_overlapping_layout_elements(
@@ -2670,32 +2789,6 @@ impl OARStructure {
         Ok(text_regions)
     }
 
-    /// Analyzes the structure of a document image from a path.
-    ///
-    /// # Arguments
-    ///
-    /// * `image_path` - Path to the input image
-    ///
-    /// # Returns
-    ///
-    /// A `StructureResult` containing detected layout elements, tables, formulas, and text.
-    pub fn predict(&self, image_path: impl Into<PathBuf>) -> Result<StructureResult, OCRError> {
-        let image_path = image_path.into();
-
-        // Load the image
-        let image = image::open(&image_path).map_err(|e| OCRError::InvalidInput {
-            message: format!(
-                "failed to load image from '{}': {}",
-                image_path.display(),
-                e
-            ),
-        })?;
-
-        let mut result = self.predict_image(image.to_rgb8())?;
-        result.input_path = std::sync::Arc::from(image_path.to_string_lossy().as_ref());
-        Ok(result)
-    }
-
     /// Preprocesses a page image before layout detection. Batch callers fill the
     /// layout fields later so model inference can run across pages.
     fn preprocess_page(&self, image: image::RgbImage) -> Result<PreparedPage, OCRError> {
@@ -2975,8 +3068,7 @@ impl OARStructure {
         Ok(result)
     }
 
-    /// Analyzes the structure of a single document image.
-    pub fn predict_image(&self, image: image::RgbImage) -> Result<StructureResult, OCRError> {
+    fn predict_image(&self, image: image::RgbImage) -> Result<StructureResult, OCRError> {
         let t_total = Instant::now();
         let prepared = self.prepare_page(image)?;
         let formulas =
@@ -3408,16 +3500,7 @@ impl OARStructure {
         );
     }
 
-    /// Analyzes multiple document page images with configured batching.
-    ///
-    /// Image-level stages are chunked according to `image_batch_size` when
-    /// configured, otherwise the layout adapter's recommended batch size is used.
-    /// OCR recognition crops are aggregated across the full input set and split
-    /// according to `region_batch_size` when configured.
-    ///
-    /// Per-page errors are returned individually so that a failure on one page does
-    /// not abort the remaining pages.
-    pub fn predict_images(
+    fn predict_images(
         &self,
         images: Vec<image::RgbImage>,
     ) -> Vec<Result<StructureResult, OCRError>> {

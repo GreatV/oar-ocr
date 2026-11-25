@@ -85,10 +85,12 @@ impl OAROCR {
         Ok(readings)
     }
     pub(super) fn crop_line(&self, img: &RgbImage, q: &Quad) -> Result<RgbImage, OCRError> {
-        if self.stages.crop_strategy == CropStrategy::PerspectiveCubic {
-            Ok(geometry::crop(img, q))
-        } else {
-            oar_ocr_core::utils::get_rotate_crop_image(img, &super::as_bbox(q).points)
+        match self.stages.crop_strategy {
+            CropStrategy::PerspectiveCubic => Ok(geometry::crop(img, q)),
+            CropStrategy::UprightCubic => Ok(super::lines::crop(img, q)),
+            CropStrategy::Standard => {
+                oar_ocr_core::utils::get_rotate_crop_image(img, &super::as_bbox(q).points)
+            }
         }
     }
     pub(super) fn read_boxes(

@@ -1,5 +1,9 @@
 //! OpenCV-compatible image operations for OCR preprocessing.
 use image::{GrayImage, Luma, Rgb, RgbImage};
+
+#[path = "raster_scalar.rs"]
+pub mod scalar;
+
 /// Interpolation of [`resize`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Interp {
