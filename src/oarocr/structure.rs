@@ -1616,15 +1616,6 @@ impl OARStructure {
     }
 }
 
-/// Reading-order sort shared with the text-layout pipeline.
-pub(super) fn sort_layout_elements(
-    layout_elements: &mut Vec<crate::domain::structure::LayoutElement>,
-    page_width: f32,
-    page_height: f32,
-) {
-    DetectionStructure::sort_layout_elements_enhanced(layout_elements, page_width, page_height);
-}
-
 /// The detection-first structure pipeline.
 #[derive(Debug)]
 struct DetectionStructure {

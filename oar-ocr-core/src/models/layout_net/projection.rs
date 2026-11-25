@@ -4041,14 +4041,8 @@ pub(super) fn project_ocr_page(
     let mut frame = page;
     if turn != 0 {
         for it in &mut items {
-            let (x, y, bw, bh) = (it.x, it.y, it.width, it.height);
-            (it.x, it.y, it.width, it.height) = match turn {
-                // Reading bottom to top: the page's top edge is on the left.
-                1 => (h - (y + bh), x, bh, bw),
-                2 => (w - (x + bw), h - (y + bh), bw, bh),
-                // Reading top to bottom: the page's top edge is on the right.
-                _ => (y, w - (x + bw), bh, bw),
-            };
+            [it.x, it.y, it.width, it.height] =
+                turn_box([it.x, it.y, it.width, it.height], turn, page);
             it.rotation = 0.0;
         }
         if turn != 2 {
@@ -4069,6 +4063,20 @@ pub(super) fn project_ocr_page(
         })
         .collect();
     (project_signals(frame.0, frame.1, boxes), turn, frame)
+}
+
+/// A box on the page, as left, top, width and height, in the reading frame of a page read at `turn` quarter turns.
+pub(super) fn turn_box(b: [f32; 4], turn: usize, page: (f32, f32)) -> [f32; 4] {
+    let [x, y, bw, bh] = b;
+    let (w, h) = page;
+    match turn {
+        // Reading bottom to top: the page's top edge is on the left.
+        1 => [h - (y + bh), x, bh, bw],
+        2 => [w - (x + bw), h - (y + bh), bw, bh],
+        // Reading top to bottom: the page's top edge is on the right.
+        3 => [y, w - (x + bw), bh, bw],
+        _ => b,
+    }
 }
 
 /// A box of a turned page's reading frame, back on the page as left, top, width and height.
@@ -4139,5 +4147,9 @@ mod tests {
         // In the reading frame the first line is 300 wide and 12 tall.
         assert_eq!(items[0].bx, [300.0, 100.0, 300.0, 12.0]);
         assert_eq!(unturn(items[0].bx, turn, page), [100.0, 200.0, 12.0, 300.0]);
+        for turn in 0..4 {
+            let b = [40.0, 90.0, 120.0, 16.0];
+            assert_eq!(unturn(turn_box(b, turn, page), turn, page), b);
+        }
     }
 }

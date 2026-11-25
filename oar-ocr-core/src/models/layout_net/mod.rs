@@ -196,6 +196,29 @@ pub struct LayoutNetOutput {
     pub blocks: Vec<LayoutNetBlock>,
     /// The units that table and block indices refer to.
     pub units: Vec<LayoutNetUnit>,
+    /// Quarter turns the page's text reads at, and the image size.
+    turn: usize,
+    size: (f32, f32),
+}
+
+impl LayoutNetOutput {
+    /// A box in image pixels as it lies in the page's reading frame, which differs from the image for a page read sideways or upside down.
+    ///
+    /// All boxes of the output are in image pixels. Order blocks by their reading-frame boxes.
+    pub fn reading_frame(&self, bbox: [f32; 4]) -> [f32; 4] {
+        let [x0, y0, x1, y1] = bbox;
+        let [x, y, w, h] = projection::turn_box([x0, y0, x1 - x0, y1 - y0], self.turn, self.size);
+        [x, y, x + w, y + h]
+    }
+
+    /// Width and height of the page's reading frame in pixels.
+    pub fn reading_frame_size(&self) -> (f32, f32) {
+        if self.turn % 2 == 1 {
+            (self.size.1, self.size.0)
+        } else {
+            self.size
+        }
+    }
 }
 
 /// LayoutNet over ONNX Runtime.
@@ -379,6 +402,8 @@ impl LayoutNetModel {
         {
             return Ok(LayoutNetOutput {
                 units,
+                turn,
+                size: (width as f32, height as f32),
                 ..Default::default()
             });
         }
@@ -551,6 +576,8 @@ impl LayoutNetModel {
             tables,
             blocks,
             units,
+            turn,
+            size: (width as f32, height as f32),
         })
     }
 }

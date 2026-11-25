@@ -7,6 +7,7 @@ use oar_ocr_core::domain::structure::{
 };
 use oar_ocr_core::models::layout_net::{BLOCK_CLASSES, LayoutNetModel, LayoutUnit};
 use oar_ocr_core::processors::BoundingBox;
+use oar_ocr_core::processors::layout_sorting::{SortableElement, sort_layout_enhanced};
 use std::sync::Arc;
 
 /// OCR followed by a layout model that reads the recognized lines.
@@ -67,13 +68,17 @@ impl TextLayoutStructure {
                 )
             })
             .collect();
-        let found = self.layout_net.predict(&page.input_img, &lines)?;
-        let units = found.units;
+        let mut found = self.layout_net.predict(&page.input_img, &lines)?;
+        let units = std::mem::take(&mut found.units);
+        let (tables_found, blocks_found) = (
+            std::mem::take(&mut found.tables),
+            std::mem::take(&mut found.blocks),
+        );
 
         let mut in_table = vec![false; units.len()];
         let mut elements = Vec::new();
         let mut tables = Vec::new();
-        for table in found.tables {
+        for table in tables_found {
             for &i in &table.units {
                 in_table[i] = true;
             }
@@ -100,40 +105,77 @@ impl TextLayoutStructure {
                     .with_e2e(true),
             );
         }
-        if found.blocks.is_empty() {
+        if blocks_found.is_empty() {
             // The model skips pages with almost no text, whose units are then the blocks.
             for unit in &units {
                 let element = LayoutElement::new(rect(unit.bbox), LayoutElementType::Text, 1.0);
                 elements.push(element.with_text(unit.text.clone()));
             }
         }
-        for block in found.blocks {
-            // Blocks cover every unit, so a block mostly inside a decoded table repeats it.
-            let inside = block.units.iter().filter(|&&i| in_table[i]).count();
-            if inside * 2 > block.units.len() {
+        for block in blocks_found {
+            // Blocks cover every unit, and tables are decoded separately: a table's units leave the block, and what is left keeps its place.
+            let rest: Vec<usize> = block
+                .units
+                .iter()
+                .copied()
+                .filter(|&i| !in_table[i])
+                .collect();
+            if rest.is_empty() {
                 continue;
             }
             let class = BLOCK_CLASSES[block.class];
             let kind = element_type(class);
-            let text = if kind == LayoutElementType::List {
-                // One item per unit.
-                let items: Vec<&str> = block
-                    .units
-                    .iter()
-                    .map(|&i| units[i].text.as_str())
-                    .collect();
-                items.join("\n")
+            let texts: Vec<&str> = rest.iter().map(|&i| units[i].text.as_str()).collect();
+            // A list has one item per unit.
+            let text = texts.join(if kind == LayoutElementType::List {
+                "\n"
             } else {
-                block.text
+                " "
+            });
+            let bbox = if rest.len() == block.units.len() {
+                block.bbox
+            } else {
+                rest.iter().fold(
+                    [
+                        f32::INFINITY,
+                        f32::INFINITY,
+                        f32::NEG_INFINITY,
+                        f32::NEG_INFINITY,
+                    ],
+                    |b, &i| {
+                        let u = units[i].bbox;
+                        [
+                            b[0].min(u[0]),
+                            b[1].min(u[1]),
+                            b[2].max(u[2]),
+                            b[3].max(u[3]),
+                        ]
+                    },
+                )
             };
             elements.push(
-                LayoutElement::new(rect(block.bbox), kind, block.score)
+                LayoutElement::new(rect(bbox), kind, block.score)
                     .with_label(class)
                     .with_text(text),
             );
         }
-        let (width, height) = page.input_img.dimensions();
-        super::structure::sort_layout_elements(&mut elements, width as f32, height as f32);
+        // Reading order is found in the page's reading frame, which is not the image's for a page read sideways or upside down.
+        let sortable: Vec<SortableElement> = elements
+            .iter()
+            .map(|e| {
+                let b = &e.bbox;
+                SortableElement {
+                    bbox: rect(found.reading_frame([b.x_min(), b.y_min(), b.x_max(), b.y_max()])),
+                    element_type: e.element_type,
+                    num_lines: e.num_lines,
+                }
+            })
+            .collect();
+        let (width, height) = found.reading_frame_size();
+        let order = sort_layout_enhanced(&sortable, width, height);
+        if order.len() == elements.len() {
+            elements = order.into_iter().map(|i| elements[i].clone()).collect();
+        }
         for (i, element) in elements.iter_mut().enumerate() {
             element.order_index = Some(i as u32 + 1);
         }
