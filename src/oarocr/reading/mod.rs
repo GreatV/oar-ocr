@@ -163,6 +163,8 @@ impl OAROCR {
                 img = Arc::new(imageops::rotate270(img.as_ref()));
             }
             boxes = self.detect_text_boxes(&img)?;
+            // Faint candidates belong to the image they were detected in.
+            faint.clear();
         }
         if self.stages.page_orientation == PageOrientation::LineShapes
             && lines::looks_sideways(&quads(&boxes))
@@ -188,6 +190,7 @@ impl OAROCR {
             img = Arc::new(upright);
             forward = m * forward;
             boxes = self.detect_text_boxes(&img)?;
+            faint.clear();
         }
         if self.stages.split_column_gutters {
             boxes = lines::split_gutters(&img, &quads(&boxes))
