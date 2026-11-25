@@ -1,0 +1,17 @@
+LiteParse (LlamaIndex)
+
+The scalar raster operations, line-kernel detection geometry, grayscale line
+batching and script routing are adapted from LiteParse's ocria-nano runtime,
+and the LayoutNet features and decoding from its table model:
+
+  https://github.com/run-llama/liteparse (crates/liteparse/src/ocr/ocria and
+  crates/liteparse/src/table_model, v2.21.2)
+  Copyright (c) LlamaIndex, Inc.
+  Licensed under the Apache License, Version 2.0: http://www.apache.org/licenses/LICENSE-2.0
+
+Files: processors/raster_scalar.rs, processors/line_kernels.rs,
+models/recognition/crnn_frames.rs (GrayBuckets and GraphArgmax),
+models/classification/line_router.rs, models/layout_net/.
+
+The OCRia-nano-1 model files that this code runs are not part of this crate.
+LlamaIndex distributes them under the OCRia-nano-1 Model License.

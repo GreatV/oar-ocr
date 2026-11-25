@@ -22,6 +22,7 @@ use oar_ocr_core::domain::adapters::{
     UVDocRectifierAdapterBuilder,
 };
 use oar_ocr_core::domain::tasks::{TextDetectionConfig, TextRecognitionConfig};
+use oar_ocr_core::models::classification::LineRouterModel;
 use oar_ocr_core::processors::BoundingBox;
 use reading::options::PageStages;
 pub use reading::options::{
@@ -30,6 +31,9 @@ pub use reading::options::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Line boxes of a page and its faint short-token candidates.
+type PageBoxes = (Vec<BoundingBox>, Vec<BoundingBox>);
 
 /// Internal structure holding the OCR pipeline adapters.
 #[derive(Debug)]
@@ -40,6 +44,60 @@ pub(super) struct OCRPipeline {
     pub(super) text_line_orientation_adapter: Option<TextLineOrientationAdapter>,
     pub(super) text_recognition_adapter: TextRecognitionAdapter,
     pub(super) secondary_recognizer: Option<(TextRecognitionAdapter, SecondaryRouting)>,
+    pub(super) scripts: Option<reading::scripts::ScriptModels>,
+}
+
+/// Recognizer for one script group of [`OAROCRBuilder::script_router`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ScriptRecognizer {
+    model: ModelSource,
+    character_dict_path: PathBuf,
+    visual_rtl: bool,
+}
+
+impl ScriptRecognizer {
+    /// Creates a script recognizer from its model and character dictionary.
+    pub fn new(model: impl Into<ModelSource>, character_dict_path: impl Into<PathBuf>) -> Self {
+        Self {
+            model: model.into(),
+            character_dict_path: character_dict_path.into(),
+            visual_rtl: false,
+        }
+    }
+
+    /// Reorder right-to-left readings into logical order, for a model that writes them in visual order.
+    pub fn visual_rtl(mut self, value: bool) -> Self {
+        self.visual_rtl = value;
+        self
+    }
+}
+
+/// A field of a model's optional JSON metadata file.
+fn model_meta(path: &std::path::Path, key: &str) -> Option<serde_json::Value> {
+    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    meta.get(key).cloned()
+}
+
+/// Dictionary entries: one per line, or the strings of a JSON array for a `.json` path.
+fn read_character_dict(path: &std::path::Path) -> Result<Vec<String>, OCRError> {
+    let path = resolve_model_path(path)?;
+    let invalid = |e: &dyn std::fmt::Display| OCRError::InvalidInput {
+        message: format!(
+            "Failed to read character dictionary from '{}': {}",
+            path.display(),
+            e
+        ),
+    };
+    let content = std::fs::read_to_string(&path).map_err(|e| invalid(&e))?;
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+    {
+        serde_json::from_str(&content).map_err(|e| invalid(&e))
+    } else {
+        Ok(content.lines().map(str::to_owned).collect())
+    }
 }
 
 /// Builder for constructing OCR pipelines.
@@ -72,6 +130,7 @@ pub(super) struct OCRPipeline {
 pub struct OAROCRBuilder {
     stages: PageStages,
     secondary_recognizer: Option<(ModelSource, SecondaryRouting)>,
+    script_router: Option<(ModelSource, [ScriptRecognizer; 3])>,
     // Required fields
     text_detection_model: ModelSource,
     text_recognition_model: ModelSource,
@@ -186,6 +245,7 @@ impl OAROCRBuilder {
             character_dict_content: None,
             stages: PageStages::default(),
             secondary_recognizer: None,
+            script_router: None,
             document_orientation_model: None,
             text_line_orientation_model: None,
             document_rectification_model: None,
@@ -276,6 +336,79 @@ impl OAROCRBuilder {
             .deskew_threshold(Some(2.5))
             .reading_order(ReadingOrder::TextColumns)
             .reattach_marks(true)
+    }
+    /// Load the OCRia-nano-1 preset from the upstream file names in a local directory.
+    ///
+    /// The directory holds `det.onnx`, `router.onnx` and, for each of `latin`, `cjk`, `rtl` and `world`, `rec_<group>.onnx` with `rec_<group>.charset.json`. The detector threshold comes from `det.meta.json` when present, and a recognizer's `rec_<group>.meta.json` tells whether it writes right-to-left text in visual order.
+    ///
+    /// ```no_run
+    /// use oar_ocr::oarocr::OAROCRBuilder;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ocr = OAROCRBuilder::ocria_nano_from_dir("models/OCRia-nano-1").build()?;
+    /// # let _ = ocr;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn ocria_nano_from_dir(dir: impl AsRef<std::path::Path>) -> Self {
+        let dir = dir.as_ref();
+        let recognizer = |group: &str| {
+            let visual_rtl = model_meta(&dir.join(format!("rec_{group}.meta.json")), "visual_rtl");
+            ScriptRecognizer::new(
+                dir.join(format!("rec_{group}.onnx")),
+                dir.join(format!("rec_{group}.charset.json")),
+            )
+            .visual_rtl(visual_rtl.and_then(|v| v.as_bool()).unwrap_or(false))
+        };
+        let threshold = model_meta(&dir.join("det.meta.json"), "thresh");
+        Self::new(
+            dir.join("det.onnx"),
+            dir.join("rec_latin.onnx"),
+            dir.join("rec_latin.charset.json"),
+        )
+        .with_preset_detection_config(TextDetectionConfig {
+            score_threshold: threshold.and_then(|v| v.as_f64()).unwrap_or(0.5) as f32,
+            box_threshold: 0.6,
+            limit_side_len: Some(1600),
+            ..TextDetectionConfig::default()
+        })
+        .detection_preprocessing(DetectionPreprocessing::AreaLongSide)
+        .db_geometry(DbGeometry::LineKernels)
+        .recognition_preprocessing(RecognitionPreprocessing::GrayBuckets)
+        .ctc_decoding(CtcDecoding::GraphArgmax)
+        .region_batch_size(32)
+        .crop_strategy(CropStrategy::UprightCubic)
+        .split_column_gutters(true)
+        .read_faint_tokens(true)
+        .page_orientation(PageOrientation::LineShapes)
+        .reading_order(ReadingOrder::Detector)
+        .script_router(
+            dir.join("router.onnx"),
+            [recognizer("cjk"), recognizer("rtl"), recognizer("world")],
+        )
+    }
+    /// Route each page's lines among the primary recognizer and three script recognizers.
+    ///
+    /// The router model scores a line for four groups: Latin, which the primary recognizer reads, then CJK, right-to-left and other scripts, read by `recognizers` in that order. A page that reads badly with its routed recognizer is retried with the others, lookalike characters from other scripts are folded inside Latin words, and readings with no letter or digit or with one or two unsure characters are dropped. The router also votes on whether the page is upside down. Pages are read one at a time, without the line splitting, rotation and secondary recognizer stages.
+    pub fn script_router(
+        mut self,
+        router: impl Into<ModelSource>,
+        recognizers: [ScriptRecognizer; 3],
+    ) -> Self {
+        self.script_router = Some((router.into(), recognizers));
+        self
+    }
+    /// Cut line boxes at blank column gutters that line up with the edges of neighbouring boxes.
+    pub fn split_column_gutters(mut self, value: bool) -> Self {
+        self.stages.split_column_gutters = value;
+        self
+    }
+    /// Read the short tokens a [`DbGeometry::LineKernels`] detector scored under its threshold and keep the confident ones.
+    ///
+    /// It applies with a [script router](Self::script_router), whose page recognizer reads them. Their regions carry the label `faint`.
+    pub fn read_faint_tokens(mut self, value: bool) -> Self {
+        self.stages.read_faint_tokens = value;
+        self
     }
     /// Load a secondary recognizer for lines selected by the routing policy.
     pub fn secondary_recognizer(
@@ -607,21 +740,10 @@ impl OAROCRBuilder {
             self.gpu_memory_budget,
         );
 
-        // Load character dictionary for text recognition
-        let char_dict = match &self.character_dict_content {
-            Some(content) => content.clone(),
-            None => {
-                let character_dict_path = resolve_model_path(&self.character_dict_path)?;
-                std::fs::read_to_string(&character_dict_path).map_err(|e| {
-                    OCRError::InvalidInput {
-                        message: format!(
-                            "Failed to read character dictionary from '{}': {}",
-                            character_dict_path.display(),
-                            e
-                        ),
-                    }
-                })?
-            }
+        // Load character dictionary for text recognition, one character per entry
+        let char_dict_vec: Vec<String> = match &self.character_dict_content {
+            Some(content) => content.lines().map(str::to_owned).collect(),
+            None => read_character_dict(&self.character_dict_path)?,
         };
 
         // Build document rectification adapter if enabled
@@ -664,9 +786,6 @@ impl OAROCRBuilder {
         )?;
 
         // Build text recognition adapter (required)
-        // Parse char_dict into Vec<String> - one character per line
-        let char_dict_vec: Vec<String> = char_dict.lines().map(|s| s.to_string()).collect();
-
         let build_recognizer = |source, dict| {
             let mut builder = TextRecognitionAdapterBuilder::new()
                 .character_dict(dict)
@@ -687,6 +806,29 @@ impl OAROCRBuilder {
         } else {
             None
         };
+        let scripts = if let Some((router, recognizers)) = &self.script_router {
+            let mut adapters = Vec::with_capacity(recognizers.len());
+            for recognizer in recognizers {
+                adapters.push((
+                    build_recognizer(
+                        resolve_model_source(&recognizer.model)?,
+                        read_character_dict(&recognizer.character_dict_path)?,
+                    )?,
+                    recognizer.visual_rtl,
+                ));
+            }
+            Some(reading::scripts::ScriptModels {
+                router: LineRouterModel::new(
+                    resolve_model_source(router)?,
+                    self.ort_session_config.clone(),
+                )?,
+                recognizers: adapters
+                    .try_into()
+                    .expect("one adapter per script recognizer"),
+            })
+        } else {
+            None
+        };
         let text_recognition_adapter = build_recognizer(text_recognition_model, char_dict_vec)?;
         let pipeline = OCRPipeline {
             rectification_adapter,
@@ -695,6 +837,7 @@ impl OAROCRBuilder {
             text_line_orientation_adapter,
             text_recognition_adapter,
             secondary_recognizer,
+            scripts,
         };
 
         Ok(OAROCR {
@@ -842,7 +985,8 @@ impl OAROCR {
             })
             .max(1);
 
-        let mut all_detection_boxes: Vec<Vec<BoundingBox>> = vec![Vec::new(); prepared.len()];
+        // Line boxes and faint short-token candidates per image.
+        let mut all_detection_boxes: Vec<PageBoxes> = vec![Default::default(); prepared.len()];
 
         let mut start = 0usize;
         while start < prepared.len() {
@@ -868,7 +1012,10 @@ impl OAROCR {
                         "Batched text detection failed; falling back to per-image detection"
                     );
                     for i in start..end {
-                        all_detection_boxes[i] = self.detect_text_boxes(&prepared[i].1.image)?;
+                        all_detection_boxes[i] = self
+                            .detect_text_boxes_batch(vec![Arc::clone(&prepared[i].1.image)])?
+                            .pop()
+                            .unwrap_or_default();
                     }
                 }
             }
@@ -880,13 +1027,13 @@ impl OAROCR {
             .iter()
             .map(|(_, p)| &p.image)
             .zip(all_detection_boxes)
-            .map(|(img, boxes)| (img, self.line_image_fallback(img, boxes)));
-        let pages = if self.stages.needs_page_loop() {
+            .map(|(img, (boxes, faint))| (img, self.line_image_fallback(img, boxes), faint));
+        let pages = if self.stages.needs_page_loop() || self.pipeline.scripts.is_some() {
             inputs
-                .map(|(image, boxes)| self.read_working_page(image, boxes))
+                .map(|(image, boxes, faint)| self.read_working_page(image, boxes, faint))
                 .collect::<Result<Vec<_>, _>>()?
         } else {
-            let inputs: Vec<_> = inputs.collect();
+            let inputs: Vec<_> = inputs.map(|(image, boxes, _)| (image, boxes)).collect();
             self.read_batch(&inputs)?
                 .into_iter()
                 .zip(&inputs)
@@ -912,6 +1059,7 @@ impl OAROCR {
                     text_regions,
                     orientation_angle: if self.stages.page_orientation
                         == PageOrientation::RecognitionVote
+                        || rotation != 0
                     {
                         Some((preprocess.orientation_angle.unwrap_or(0.) + rotation as f32) % 360.)
                     } else {
@@ -926,12 +1074,21 @@ impl OAROCR {
         Ok(results)
     }
 
+    /// Line boxes of each image with, when the faint-token stage is on, its faint candidates.
     fn detect_text_boxes_batch(
         &self,
         images: Vec<Arc<image::RgbImage>>,
-    ) -> Result<Vec<Vec<BoundingBox>>, OCRError> {
+    ) -> Result<Vec<PageBoxes>, OCRError> {
         if images.is_empty() {
             return Ok(Vec::new());
+        }
+        if self.stages.read_faint_tokens {
+            let images: Vec<_> = images.iter().map(AsRef::as_ref).collect();
+            let detected = self
+                .pipeline
+                .text_detection_adapter
+                .detect_with_faint(&images)?;
+            return Ok(detected.into_iter().map(|d| (d.lines, d.faint)).collect());
         }
 
         let input = ImageTaskInput::from_arc_images(images);
@@ -940,7 +1097,7 @@ impl OAROCR {
         Ok(det
             .detections
             .into_iter()
-            .map(|detections| detections.into_iter().map(|d| d.bbox).collect())
+            .map(|detections| (detections.into_iter().map(|d| d.bbox).collect(), Vec::new()))
             .collect())
     }
 
@@ -948,9 +1105,13 @@ impl OAROCR {
         &self,
         image: &Arc<image::RgbImage>,
     ) -> Result<Vec<BoundingBox>, OCRError> {
-        Ok(self
-            .detect_text_boxes_batch(vec![Arc::clone(image)])?
-            .pop()
+        let input = ImageTaskInput::from_arc_images(vec![Arc::clone(image)]);
+        let det = self.pipeline.text_detection_adapter.execute(input, None)?;
+        Ok(det
+            .detections
+            .into_iter()
+            .next()
+            .map(|detections| detections.into_iter().map(|d| d.bbox).collect())
             .unwrap_or_default())
     }
 
@@ -1219,6 +1380,28 @@ mod tests {
             assert_eq!(resolve("Seal"), 0.5);
             assert_eq!(resolve("GENERAL"), 1.4);
         }
+    }
+
+    #[test]
+    fn ocria_nano_preset_reads_thresholds_dictionaries_and_text_order_from_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, content: &str| std::fs::write(dir.path().join(name), content);
+        write("det.meta.json", r#"{"thresh": 0.55}"#).unwrap();
+        write("rec_rtl.meta.json", r#"{"visual_rtl": true}"#).unwrap();
+        write("rec_cjk.charset.json", r#"[" ", "\"", "中"]"#).unwrap();
+        let builder = OAROCRBuilder::ocria_nano_from_dir(dir.path());
+        let detection = builder.effective_text_detection_config();
+        assert_eq!(detection.score_threshold, 0.55);
+        assert_eq!(detection.limit_side_len, Some(1600));
+        let (_, [cjk, rtl, world]) = builder.script_router.as_ref().unwrap();
+        assert_eq!(
+            [cjk.visual_rtl, rtl.visual_rtl, world.visual_rtl],
+            [false, true, false]
+        );
+        assert_eq!(
+            read_character_dict(&cjk.character_dict_path).unwrap(),
+            [" ", "\"", "中"]
+        );
     }
 
     #[test]

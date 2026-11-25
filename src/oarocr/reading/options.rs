@@ -11,6 +11,8 @@ pub enum CropStrategy {
     Standard,
     /// Sample each quadrilateral using fixed-point cubic interpolation.
     PerspectiveCubic,
+    /// Sample each quadrilateral with cubic interpolation and turn crops at least 1.5 times taller than wide a quarter turn counter-clockwise.
+    UprightCubic,
 }
 /// Selects the recognition postprocessing policy.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +33,10 @@ pub enum PageOrientation {
     Standard,
     /// Choose page rotation by comparing primary recognizer confidence.
     RecognitionVote,
+    /// Redetect a page a quarter turn counter-clockwise when few of its boxes are horizontal lines, and keep the turn if it finds far more lines.
+    ///
+    /// The turn can leave the page upside down, which the vote of a [script router](crate::oarocr::OAROCRBuilder::script_router) corrects.
+    LineShapes,
 }
 /// Selects the reading order policy.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +47,8 @@ pub enum ReadingOrder {
     Standard,
     /// Find prose columns and group recognized lines into rows.
     TextColumns,
+    /// Keep the detector's line order with each region on its own line.
+    Detector,
 }
 /// Selects the secondary recognition routing policy.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +73,8 @@ pub(in crate::oarocr) struct PageStages {
     pub(in crate::oarocr) deskew_threshold: Option<f64>,
     pub(in crate::oarocr) reading_order: ReadingOrder,
     pub(in crate::oarocr) reattach_marks: bool,
+    pub(in crate::oarocr) split_column_gutters: bool,
+    pub(in crate::oarocr) read_faint_tokens: bool,
 }
 
 impl PageStages {
@@ -72,5 +82,8 @@ impl PageStages {
         self.page_orientation == PageOrientation::RecognitionVote
             || self.deskew_threshold.is_some()
             || self.reattach_marks
+            || self.page_orientation == PageOrientation::LineShapes
+            || self.split_column_gutters
+            || self.read_faint_tokens
     }
 }

@@ -31,7 +31,9 @@ pub mod document_rectification_adapter;
 
 // Re-export detection adapters
 pub use seal_text_detection_adapter::{SealTextDetectionAdapter, SealTextDetectionAdapterBuilder};
-pub use text_detection_adapter::{TextDetectionAdapter, TextDetectionAdapterBuilder};
+pub use text_detection_adapter::{
+    LineDetections, TextDetectionAdapter, TextDetectionAdapterBuilder,
+};
 
 // Re-export layout detection adapters
 pub use layout_detection_adapter::{

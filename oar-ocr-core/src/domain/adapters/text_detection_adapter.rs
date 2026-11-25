@@ -14,7 +14,7 @@ use crate::domain::tasks::{
 };
 use crate::impl_adapter_builder;
 use crate::models::detection::db::{DBModel, DBModelBuilder, DBPostprocessConfig};
-use crate::processors::{BoxType, ScoreMode};
+use crate::processors::{BoundingBox, BoxType, ScoreMode};
 
 /// Text detection adapter that uses the DB model.
 #[derive(Debug)]
@@ -43,32 +43,64 @@ impl ModelAdapter for TextDetectionAdapter {
     ) -> Result<<Self::Task as Task>::Output, OCRError> {
         let effective_config = config.unwrap_or(&self.config);
         let image_refs: Vec<_> = input.images.iter().map(AsRef::as_ref).collect();
+        let (detections, _) = self.detect(&image_refs, effective_config, false)?;
+        Ok(TextDetectionOutput { detections })
+    }
 
-        // Use the DB model to detect text with error context
+    fn supports_batching(&self) -> bool {
+        true
+    }
+
+    fn recommended_batch_size(&self) -> usize {
+        8
+    }
+}
+
+/// Text lines of one image with the faint short-token candidates beside them.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct LineDetections {
+    /// Detected line boxes.
+    pub lines: Vec<BoundingBox>,
+    /// Regions the detector scored under its threshold beside a detected line.
+    pub faint: Vec<BoundingBox>,
+}
+
+/// One list per input image.
+type PerImage<T> = Vec<Vec<T>>;
+
+impl TextDetectionAdapter {
+    fn detect(
+        &self,
+        images: &[&image::RgbImage],
+        config: &TextDetectionConfig,
+        with_faint: bool,
+    ) -> Result<(PerImage<Detection>, PerImage<BoundingBox>), OCRError> {
         let geometry_config = crate::processors::DBPostProcessConfig::new(
-            effective_config.score_threshold,
-            effective_config.box_threshold,
-            effective_config.unclip_ratio,
+            config.score_threshold,
+            config.box_threshold,
+            config.unclip_ratio,
         );
-        let model_output = self.model
+        let (model_output, faint) = self
+            .model
             .detect_with_geometry(
-                &image_refs, self.preprocessing, self.geometry,
-                effective_config.limit_side_len.unwrap_or(1280), &geometry_config,
+                images,
+                self.preprocessing,
+                self.geometry,
+                config.limit_side_len.unwrap_or(1280),
+                &geometry_config,
+                with_faint,
             )
             .map_err(|e| {
                 OCRError::adapter_execution_error(
                     "TextDetectionAdapter",
                     format!(
                         "failed to detect text (score_threshold={}, box_threshold={}, unclip_ratio={})",
-                        effective_config.score_threshold,
-                        effective_config.box_threshold,
-                        effective_config.unclip_ratio
+                        config.score_threshold, config.box_threshold, config.unclip_ratio
                     ),
                     e,
                 )
             })?;
-
-        // Convert model output to structured detections
         let detections = model_output
             .boxes
             .into_iter()
@@ -81,16 +113,25 @@ impl ModelAdapter for TextDetectionAdapter {
                     .collect()
             })
             .collect();
-
-        Ok(TextDetectionOutput { detections })
+        Ok((detections, faint))
     }
 
-    fn supports_batching(&self) -> bool {
-        true
-    }
-
-    fn recommended_batch_size(&self) -> usize {
-        8
+    /// Detect text lines and, per image, the faint short-token candidates of the same pass.
+    ///
+    /// Only [`DbGeometry::LineKernels`] finds candidates. They are worth keeping only when a recognizer reads them confidently.
+    pub fn detect_with_faint(
+        &self,
+        images: &[&image::RgbImage],
+    ) -> Result<Vec<LineDetections>, OCRError> {
+        let (detections, faint) = self.detect(images, &self.config, true)?;
+        Ok(detections
+            .into_iter()
+            .zip(faint)
+            .map(|(lines, faint)| LineDetections {
+                lines: lines.into_iter().map(|d| d.bbox).collect(),
+                faint,
+            })
+            .collect())
     }
 }
 

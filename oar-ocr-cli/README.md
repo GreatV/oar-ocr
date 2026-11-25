@@ -1,6 +1,6 @@
 # OAR command-line tool
 
-`oar` provides PP-OCR, Indra OCR, OpenThai Text, document structure analysis, and vision-language page parsing. Missing classic and VL models download automatically from ModelScope by default; Indra downloads directly from Hugging Face. The default device is `auto`, selecting compiled accelerators before CPU.
+`oar` provides PP-OCR, Indra OCR, OpenThai Text, OCRia-nano-1, document structure analysis, and vision-language page parsing. Missing classic and VL models download automatically from ModelScope by default; Indra downloads directly from Hugging Face. The default device is `auto`, selecting compiled accelerators before CPU.
 
 ## Install
 
@@ -56,6 +56,16 @@ oar ocr --preset openthai report.pdf --model-dir checkpoints/OpenThai2.0-OCR-Tex
 ```
 
 The default output joins Thai and English text in page reading order. JSON contains ordinary OCR regions, recognition confidence and original-image line and word boxes. The default build resolves the pinned inference files through the model registry. Use `--model-dir` to read the four upstream files locally.
+
+## OCRia-nano-1
+
+```bash
+oar ocr --preset ocria-nano --model-dir checkpoints/OCRia-nano-1 page.png --device cpu
+oar ocr --preset ocria-nano --model-dir checkpoints/OCRia-nano-1 scan.pdf --format json
+oar structure --preset ocria-nano --model-dir checkpoints/OCRia-nano-1 scan.pdf
+```
+
+`oar ocr` reads Latin, CJK, right-to-left and other scripts, one line of text per detected line. `oar structure` adds LayoutNet, which groups those lines into headings, paragraphs, lists and tables and writes Markdown or page JSON. `--model-dir` is required: the weights are under the OCRia-nano-1 Model License and are not downloaded automatically. Fetch [llamaindex/OCRia-nano-1](https://huggingface.co/llamaindex/OCRia-nano-1) into that directory first.
 
 ## Indra OCR
 

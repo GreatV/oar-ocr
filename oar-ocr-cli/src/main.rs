@@ -4,7 +4,7 @@ mod parallel;
 mod pdf;
 
 use anyhow::{Context, Result, bail, ensure};
-use args::{Cli, Command, Common, IndraFormat, OcrFormat, PageFormat};
+use args::{Cli, Command, Common, IndraFormat, OcrFormat, OcrPreset, PageFormat, StructurePreset};
 use clap::Parser;
 use image::RgbImage;
 use oar_ocr::{
@@ -172,11 +172,19 @@ fn run(cli: Cli) -> Result<()> {
             let build = |device: &str| -> Result<_> {
                 let builder = match (&args.models.det, &args.models.rec, &args.models.dict) {
                     (Some(det), Some(rec), Some(dict)) => OAROCRBuilder::new(det, rec, dict),
-                    (None, None, None) if args.preset.is_some() => match &args.model_dir {
-                        Some(dir) => OAROCRBuilder::openthai_from_dir(dir),
-                        None => OAROCRBuilder::openthai(),
+                    (None, None, None) => match (args.preset, &args.model_dir) {
+                        (Some(OcrPreset::Openthai), Some(dir)) => {
+                            OAROCRBuilder::openthai_from_dir(dir)
+                        }
+                        (Some(OcrPreset::Openthai), None) => OAROCRBuilder::openthai(),
+                        (Some(OcrPreset::OcriaNano), Some(dir)) => {
+                            OAROCRBuilder::ocria_nano_from_dir(dir)
+                        }
+                        (Some(OcrPreset::OcriaNano), None) => bail!(
+                            "--preset ocria-nano reads the llamaindex/OCRia-nano-1 files from --model-dir"
+                        ),
+                        (None, _) => OAROCRBuilder::pp_ocrv6(args.size.into()),
                     },
-                    (None, None, None) => OAROCRBuilder::pp_ocrv6(args.size.into()),
                     _ => bail!("custom OCR models require --det, --rec, and --dict together"),
                 };
                 builder
@@ -256,7 +264,15 @@ fn run(cli: Cli) -> Result<()> {
                 let builder = OARStructureBuilder::pp_structurev3();
                 let builder = match (&args.models.det, &args.models.rec, &args.models.dict) {
                     (Some(det), Some(rec), Some(dict)) => builder.with_ocr(det, rec, dict),
-                    (None, None, None) => builder,
+                    (None, None, None) => match (args.preset, &args.model_dir) {
+                        (Some(StructurePreset::OcriaNano), Some(dir)) => {
+                            OARStructureBuilder::ocria_nano_from_dir(dir)
+                        }
+                        (Some(StructurePreset::OcriaNano), None) => bail!(
+                            "--preset ocria-nano reads the llamaindex/OCRia-nano-1 files from --model-dir"
+                        ),
+                        (None, _) => builder,
+                    },
                     _ => bail!("custom OCR models require --det, --rec, and --dict together"),
                 };
                 builder

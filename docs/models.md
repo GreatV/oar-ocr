@@ -92,6 +92,22 @@ The [OpenThai2.0-OCR-Text v2.1 checkpoint](https://huggingface.co/iapp/OpenThai2
 | rec2.onnx | openthai2_rec2.onnx | 2,392,837 |
 | rec_dict.txt | openthai2_dict.txt | 1,783 |
 
+## OCRia-nano-1
+
+[OCRia-nano-1](https://huggingface.co/llamaindex/OCRia-nano-1/tree/53d45fe6803a568deedb081550c2fdb97cc99f97) is LlamaIndex's document parsing stack for CPU: a line detector, a script router, four CTC recognizers for Latin, CJK, right-to-left and about 17 other scripts, and LayoutNet, a table and layout model that reads the recognized lines. The weights and the files beside them are under the OCRia-nano-1 Model License, which restricts commercial use. They are not in the model registry and are never downloaded automatically: fetch the repository and pass its directory to `OAROCRBuilder::ocria_nano_from_dir` for OCR, or to `OARStructureBuilder::ocria_nano_from_dir` for OCR with layout and tables.
+
+| Files in the model directory | Role | Model bytes |
+|---|---|---:|
+| det.onnx, det.meta.json | Line detector and its threshold | 347,580 |
+| router.onnx | Script router with an upside-down vote | 159,029 |
+| rec_latin.onnx, rec_latin.charset.json | Latin recognizer (int8) | 943,530 |
+| rec_cjk.onnx, rec_cjk.charset.json | Chinese, Japanese and Korean recognizer | 5,077,778 |
+| rec_rtl.onnx, rec_rtl.charset.json, rec_rtl.meta.json | Arabic and Hebrew recognizer | 2,842,451 |
+| rec_world.onnx, rec_world.charset.json | Recognizer for the other scripts | 3,913,987 |
+| tablenet.onnx | LayoutNet: tables and layout blocks from the recognized lines | 17,182,635 |
+
+`OARStructureBuilder::ocria_nano_from_dir` adds LayoutNet on top of the OCR stack. `tablenet.bin`, the same weights for LiteParse's own runtime, is not used.
+
 ## Character Dictionaries
 
 Character dictionaries are required for text recognition. Choose the appropriate dictionary for your model:

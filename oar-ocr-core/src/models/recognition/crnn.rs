@@ -427,3 +427,4 @@ impl Default for CRNNModelBuilder {
 #[path = "crnn_frames.rs"]
 mod frames;
 pub use frames::{CtcDecoding, RecognitionPreprocessing};
+pub(crate) use frames::{GRAY_LINE_HEIGHT, gray_line};

@@ -82,7 +82,7 @@ pub(crate) enum PageFormat {
 
 #[derive(Args)]
 pub(crate) struct Ocr {
-    /// Select the printed Thai and English recognition pipeline
+    /// Select a recognition pipeline: OpenThai Text or OCRia-nano-1 (needs --model-dir)
     #[arg(long,value_enum,conflicts_with_all=["size","det","rec","dict"])]
     pub(crate) preset: Option<OcrPreset>,
     /// Load the preset files using upstream names from this directory
@@ -102,6 +102,7 @@ pub(crate) struct Ocr {
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum OcrPreset {
     Openthai,
+    OcriaNano,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -123,12 +124,23 @@ impl From<OcrSize> for PpOcrV6Size {
 
 #[derive(Args)]
 pub(crate) struct Structure {
+    /// Read lines with OCRia-nano-1 and group them with LayoutNet (needs --model-dir)
+    #[arg(long, value_enum, conflicts_with_all = ["det", "rec", "dict"])]
+    pub(crate) preset: Option<StructurePreset>,
+    /// Load the preset files using upstream names from this directory
+    #[arg(long, requires = "preset", value_name = "DIR")]
+    pub(crate) model_dir: Option<PathBuf>,
     #[command(flatten)]
     pub(crate) models: ClassicModels,
     #[arg(long, value_enum, default_value = "markdown")]
     pub(crate) format: PageFormat,
     #[arg(required = true, value_name = "INPUTS", num_args = 1..)]
     pub(crate) images: Vec<PathBuf>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum StructurePreset {
+    OcriaNano,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
