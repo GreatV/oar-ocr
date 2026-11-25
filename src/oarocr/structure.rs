@@ -1610,7 +1610,12 @@ impl OARStructure {
             StructureKind::Detection(structure) => structure.predict_images(images),
             StructureKind::TextLayout(structure) => images
                 .into_iter()
-                .map(|image| structure.predict_image(image))
+                .enumerate()
+                .map(|(index, image)| {
+                    let mut result = structure.predict_image(image)?;
+                    result.index = index;
+                    Ok(result)
+                })
                 .collect(),
         }
     }
