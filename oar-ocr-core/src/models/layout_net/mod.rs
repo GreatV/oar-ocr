@@ -3,6 +3,7 @@
 //! The model reads every unit's geometry and text statistics, the page's ruling lines and a 1024-pixel page image, and scores units and unit pairs: in a table, a header, the same table, row, column, cell or block, and one of 13 block classes. Tables and blocks are decoded from those scores. Adapted from LiteParse's `table_model` (Apache-2.0). See `processors/NOTICE`.
 mod decode;
 mod features;
+mod projection;
 
 use crate::core::OCRError;
 use crate::core::config::{ModelInferenceConfig, OrtSessionConfig};
@@ -64,26 +65,55 @@ impl Logits {
     }
 }
 
-/// A line or cell of text on the page.
+/// A recognized line of text on the page.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct LayoutUnit {
     /// Left, top, right and bottom in image pixels.
     pub bbox: [f32; 4],
-    /// The unit's text.
+    /// The line's corners in reading order, when the line may be rotated.
+    pub polygon: Option<[[f32; 2]; 4]>,
+    /// The line's text.
     pub text: String,
+    /// Recognition confidence.
+    pub confidence: f32,
     /// Hide the text's content from the model, which then sees only its length.
     pub opaque: bool,
 }
 
 impl LayoutUnit {
-    /// Creates a unit from its box in image pixels and its text.
+    /// Creates an upright line from its box in image pixels and its text.
     pub fn new(bbox: [f32; 4], text: impl Into<String>) -> Self {
         Self {
             bbox,
+            polygon: None,
             text: text.into(),
+            confidence: 1.0,
             opaque: false,
         }
+    }
+
+    /// Creates a line from its corners in reading order, which give its rotation and height.
+    pub fn from_polygon(polygon: [[f32; 2]; 4], text: impl Into<String>) -> Self {
+        let bound = |axis: usize, init: f32, f: fn(f32, f32) -> f32| {
+            polygon.iter().map(|p| p[axis]).fold(init, f)
+        };
+        Self {
+            bbox: [
+                bound(0, f32::INFINITY, f32::min),
+                bound(1, f32::INFINITY, f32::min),
+                bound(0, f32::NEG_INFINITY, f32::max),
+                bound(1, f32::NEG_INFINITY, f32::max),
+            ],
+            polygon: Some(polygon),
+            ..Self::new([0.0; 4], text)
+        }
+    }
+
+    /// Sets the recognition confidence. Lines at 0.1 or below are ignored.
+    pub fn confidence(mut self, value: f32) -> Self {
+        self.confidence = value;
+        self
     }
 
     /// Hide the text's content from the model, for a token whose reading should not count as table evidence.
@@ -91,6 +121,16 @@ impl LayoutUnit {
         self.opaque = value;
         self
     }
+}
+
+/// A unit as the model saw it: one projected item, which can join several input lines.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct LayoutNetUnit {
+    /// Left, top, right and bottom in image pixels.
+    pub bbox: [f32; 4],
+    /// The unit's text.
+    pub text: String,
 }
 
 /// A layout block: units the model grouped, with their class.
@@ -154,6 +194,8 @@ pub struct LayoutNetOutput {
     pub tables: Vec<LayoutNetTable>,
     /// Layout blocks over every unit, including the units inside tables.
     pub blocks: Vec<LayoutNetBlock>,
+    /// The units that table and block indices refer to.
+    pub units: Vec<LayoutNetUnit>,
 }
 
 /// LayoutNet over ONNX Runtime.
@@ -237,48 +279,127 @@ impl LayoutNetModel {
         })
     }
 
-    /// Find the tables and layout blocks of a page from its text units.
+    /// Find the tables and layout blocks of a page from its recognized lines.
     ///
-    /// The page is taken to be a 150 dpi scan. A page with fewer than 2 or more than 1500 units, or under 20 characters of text, returns nothing.
+    /// The lines are first projected onto the page grid, which joins neighbours on a line and measures the alignment signals the model was trained with. The page is taken to be a 150 dpi scan. A page with fewer than 2 or more than 1500 projected units, or under 20 characters of text, returns no tables or blocks.
     pub fn predict(
         &self,
         image: &RgbImage,
-        units: &[LayoutUnit],
+        lines: &[LayoutUnit],
     ) -> Result<LayoutNetOutput, OCRError> {
-        let n = units.len();
         let (width, height) = image.dimensions();
-        if !(2..=MAX_UNITS).contains(&n)
-            || units.iter().map(|u| u.text.chars().count()).sum::<usize>() < 20
-            || width == 0
-            || height == 0
-        {
+        if width == 0 || height == 0 {
             return Ok(LayoutNetOutput::default());
         }
-        // Boxes in points, in f64 for decoding and f32 for the features.
-        let boxes: Vec<[f64; 4]> = units
+        // Lines become text items in page points, as LiteParse's OCR merge makes them.
+        let scale = 72.0 / PAGE_DPI;
+        let page = (width as f32 * scale, height as f32 * scale);
+        let items = lines
             .iter()
-            .map(|u| u.bbox.map(|v| f64::from(v) * POINTS_PER_PIXEL))
+            .map(|line| {
+                let [x0, y0, x1, y1] = line.bbox;
+                let (w, h) = ((x1 - x0) * scale, (y1 - y0) * scale);
+                let rotation = line
+                    .polygon
+                    .map_or(0.0, |p| projection::polygon_rotation(&p));
+                let side = line
+                    .polygon
+                    .map(|p| (p[3][0] - p[0][0]).hypot(p[3][1] - p[0][1]) * scale);
+                projection::OcrLine {
+                    bx: [x0 * scale, y0 * scale, w, h],
+                    text: line.text.clone(),
+                    rotation,
+                    // A tilted line's upright box is taller than its glyphs, so its own side is the height.
+                    font_size: if rotation == 90.0 || rotation == 270.0 {
+                        w.max(1.0)
+                    } else {
+                        side.filter(|s| *s > 0.0).map_or(h, |s| s.min(h))
+                    },
+                    confidence: line.confidence,
+                    faint: line.opaque,
+                }
+            })
             .collect();
+        let (projected, turn, frame) = projection::project_ocr_page(page, items);
+
+        // Units in page points: f64 for decoding, f32 for the features. A page read after a quarter turn keeps the page's size, as in the reference.
+        let wh = (
+            f64::from(width) * POINTS_PER_PIXEL,
+            f64::from(height) * POINTS_PER_PIXEL,
+        );
+        let (sx, sy) = (
+            wh.0 / f64::from(frame.0.max(1.0)),
+            wh.1 / f64::from(frame.1.max(1.0)),
+        );
+        let mut boxes: Vec<[f64; 4]> = Vec::new();
+        let mut source: Vec<[f32; 4]> = Vec::new();
+        let mut texts: Vec<String> = Vec::new();
+        let mut signals: Vec<features::Proj> = Vec::new();
+        for item in &projected {
+            let text = item.text.trim();
+            let [x, y, w, h] = item.bx;
+            if text.is_empty() || w <= 0.0 || h <= 0.0 {
+                continue;
+            }
+            boxes.push([
+                f64::from(x) * sx,
+                f64::from(y) * sy,
+                f64::from(x + w) * sx,
+                f64::from(y + h) * sy,
+            ]);
+            source.push(item.bx);
+            signals.push(features::Proj {
+                feat_text: item.faint.then(|| "x".repeat(text.chars().count())),
+                flow: f32::from(u8::from(item.flow)),
+                lc: item.lc as f32,
+                rc: item.rc as f32,
+                cc: item.cc as f32,
+                snap: item.snap,
+                block: item.block as f32,
+                leaf: item.leaf,
+            });
+            texts.push(text.to_string());
+        }
+        // A projected box back in the image: out of the reading frame of a turned page, then points to pixels.
+        let to_image = |b: [f32; 4]| {
+            let [x, y, w, h] = projection::unturn(b, turn, page);
+            [x / scale, y / scale, (x + w) / scale, (y + h) / scale]
+        };
+        let units: Vec<LayoutNetUnit> = source
+            .iter()
+            .zip(&texts)
+            .map(|(&b, text)| LayoutNetUnit {
+                bbox: to_image(b),
+                text: text.clone(),
+            })
+            .collect();
+        let n = units.len();
+        if !(2..=MAX_UNITS).contains(&n)
+            || texts.iter().map(|t| t.chars().count()).sum::<usize>() < 20
+        {
+            return Ok(LayoutNetOutput {
+                units,
+                ..Default::default()
+            });
+        }
         let narrow = |b: &[f64; 4]| b.map(|v| v as f32);
         // A line box is padded around its text: the text height is the box height over 1.4.
         let heights: Vec<f64> = boxes.iter().map(|b| (b[3] - b[1]) / 1.4).collect();
-        let feature_units: Vec<FUnit> = units
+        let feature_units: Vec<FUnit> = texts
             .iter()
+            .zip(signals)
             .zip(boxes.iter().zip(&heights))
-            .map(|(u, (b, &h))| FUnit {
+            .map(|((text, proj), (b, &h))| FUnit {
                 bx: narrow(b),
                 pbox: narrow(b),
-                text: u.text.clone(),
+                text: text.clone(),
                 h: h as f32,
                 bold: None,
-                feat_text: u.opaque.then(|| "x".repeat(u.text.chars().count())),
+                proj: Some(proj),
             })
             .collect();
         let page_boxes: Vec<[f32; 4]> = boxes.iter().map(narrow).collect();
-        let page_size = (
-            (f64::from(width) * POINTS_PER_PIXEL) as f32,
-            (f64::from(height) * POINTS_PER_PIXEL) as f32,
-        );
+        let page_size = (wh.0 as f32, wh.1 as f32);
 
         // The grey page follows the training renders: OpenCV's integer RGB-to-grey weights applied in BGR order, so blue takes the red weight.
         let (w, h) = (width as usize, height as usize);
@@ -289,8 +410,8 @@ impl LayoutNetModel {
                 ((4899 * b + 9617 * g + 1868 * r + (1 << 13)) >> 14) as u8
             })
             .collect();
-        let scale = PAGE_DPI / 72.0;
-        let rules = features::detect_rules(&gray, w, h, scale);
+        let render_scale = PAGE_DPI / 72.0;
+        let rules = features::detect_rules(&gray, w, h, render_scale);
         let shrink = IMG_SIDE as f32 / w.max(h) as f32;
         let (tw, th) = (
             ((w as f32 * shrink).round() as usize).max(8),
@@ -300,33 +421,32 @@ impl LayoutNetModel {
             w: tw,
             h: th,
             px: features::resample_area(&gray, w, h, tw, th),
-            k: scale * shrink,
+            k: render_scale * shrink,
         };
 
         let feats = features::unit_features(&feature_units, page_size, Some(&rules));
         let pairf = features::pair_rule_features(&page_boxes, &rules);
         let logits = self.forward(feats, pairf, n, page_image.input(&page_boxes))?;
 
-        let decode_units: Vec<DUnit> = units
+        let decode_units: Vec<DUnit> = texts
             .iter()
             .zip(boxes.iter().zip(&heights))
-            .map(|(u, (&bx, &h))| DUnit {
+            .map(|(text, (&bx, &h))| DUnit {
                 bx,
-                text: u.text.clone(),
+                text: text.clone(),
                 h,
             })
             .collect();
-        let to_pixels = |b: [f64; 4]| b.map(|v| (v / POINTS_PER_PIXEL) as f32);
         let extent = |group: &[usize]| {
             group.iter().fold(
                 [
-                    f64::INFINITY,
-                    f64::INFINITY,
-                    f64::NEG_INFINITY,
-                    f64::NEG_INFINITY,
+                    f32::INFINITY,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
                 ],
                 |b, &i| {
-                    let p = boxes[i];
+                    let p = units[i].bbox;
                     [
                         b[0].min(p[0]),
                         b[1].min(p[1]),
@@ -335,6 +455,11 @@ impl LayoutNetModel {
                     ]
                 },
             )
+        };
+        // A decoded cell box is in model points: back through the page scaling, then as a projected box.
+        let cell_box = |b: [f64; 4]| {
+            let (x0, y0) = ((b[0] / sx) as f32, (b[1] / sy) as f32);
+            to_image([x0, y0, (b[2] / sx) as f32 - x0, (b[3] / sy) as f32 - y0])
         };
         let options = DecodeOptions::default();
         let mut tables = Vec::new();
@@ -349,7 +474,7 @@ impl LayoutNetModel {
             }
             let in_table = |&i: &usize| 1.0 / (1.0 + (-logits.node(i, 0)).exp());
             tables.push(LayoutNetTable {
-                bbox: to_pixels(extent(&group)),
+                bbox: extent(&group),
                 score: group.iter().map(in_table).sum::<f32>() / group.len() as f32,
                 rows: grid.n_rows,
                 cols: grid.n_cols,
@@ -363,7 +488,7 @@ impl LayoutNetModel {
                         row_span: c.r1 - c.r0 + 1,
                         col_span: c.c1 - c.c0 + 1,
                         text: c.text.clone(),
-                        bbox: to_pixels(c.bx),
+                        bbox: cell_box(c.bx),
                     })
                     .collect(),
                 header_rows: grid.head_rows,
@@ -394,7 +519,7 @@ impl LayoutNetModel {
                 // The same_block head joins running headers, side-by-side blocks, and a heading with the paragraph under it, so groups are split at wide horizontal gaps, paragraph breaks and heading changes.
                 let parts = split_at_gaps(&group, &boxes)
                     .into_iter()
-                    .flat_map(|part| split_paragraphs(&part, units, &boxes, &logits.cls, classes));
+                    .flat_map(|part| split_paragraphs(&part, &texts, &boxes, &logits.cls, classes));
                 for part in parts {
                     let part_boxes: Vec<[f64; 4]> = part.iter().map(|&i| boxes[i]).collect();
                     let part: Vec<usize> = decode::reading_order(&part_boxes)
@@ -403,7 +528,7 @@ impl LayoutNetModel {
                         .collect();
                     let text = part
                         .iter()
-                        .map(|&i| units[i].text.as_str())
+                        .map(|&i| texts[i].as_str())
                         .collect::<Vec<_>>()
                         .join(" ");
                     let class = class_of(&part);
@@ -413,7 +538,7 @@ impl LayoutNetModel {
                         (row[class] - max).exp() / row.iter().map(|v| (v - max).exp()).sum::<f32>()
                     };
                     blocks.push(LayoutNetBlock {
-                        bbox: to_pixels(extent(&part)),
+                        bbox: extent(&part),
                         class,
                         score: part.iter().map(probability).sum::<f32>() / part.len() as f32,
                         text,
@@ -422,7 +547,11 @@ impl LayoutNetModel {
                 }
             }
         }
-        Ok(LayoutNetOutput { tables, blocks })
+        Ok(LayoutNetOutput {
+            tables,
+            blocks,
+            units,
+        })
     }
 }
 
@@ -493,7 +622,7 @@ fn split_at_gaps(g: &[usize], boxes: &[[f64; 4]]) -> Vec<Vec<usize>> {
 /// A new part starts where the vertical gap to the next line is more than the block's median line height, or where the lines change between heading-like (the Heading and Title share of the class head over half, by characters) and body text.
 fn split_paragraphs(
     g: &[usize],
-    units: &[LayoutUnit],
+    texts: &[String],
     boxes: &[[f64; 4]],
     cls: &[f32],
     c: usize,
@@ -532,7 +661,7 @@ fn split_paragraphs(
             let m = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             let e: Vec<f32> = row.iter().map(|v| (v - m).exp()).collect();
             let z: f32 = e.iter().sum();
-            let chars = units[i].text.chars().filter(|ch| !ch.is_whitespace());
+            let chars = texts[i].chars().filter(|ch| !ch.is_whitespace());
             let n = chars.count().max(1) as f32;
             head += n * (e[1] + e[2]) / z;
             all += n;

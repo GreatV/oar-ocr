@@ -47,26 +47,28 @@ impl TextLayoutStructure {
             .predict(vec![image])?
             .pop()
             .ok_or_else(|| OCRError::invalid_input("OCR returned no page"))?;
-        let lines: Vec<(&BoundingBox, &str, bool)> = page
+        let lines: Vec<LayoutUnit> = page
             .text_regions
             .iter()
             .filter_map(|r| {
                 let text = r.text.as_deref().filter(|t| !t.trim().is_empty())?;
-                Some((
-                    &r.bounding_box,
-                    text,
-                    r.label.as_deref() == Some(FAINT_LABEL),
-                ))
-            })
-            .collect();
-        let units: Vec<LayoutUnit> = lines
-            .iter()
-            .map(|&(b, text, faint)| {
+                let b = &r.bounding_box;
+                let line = match b.points.as_slice() {
+                    [p0, p1, p2, p3] => LayoutUnit::from_polygon(
+                        [[p0.x, p0.y], [p1.x, p1.y], [p2.x, p2.y], [p3.x, p3.y]],
+                        text,
+                    ),
+                    _ => LayoutUnit::new([b.x_min(), b.y_min(), b.x_max(), b.y_max()], text),
+                };
                 // A faint token's reading is hidden from the model: a lone value between two cells makes it fuse the table's rows.
-                LayoutUnit::new([b.x_min(), b.y_min(), b.x_max(), b.y_max()], text).opaque(faint)
+                Some(
+                    line.confidence(r.confidence.unwrap_or(1.0))
+                        .opaque(r.label.as_deref() == Some(FAINT_LABEL)),
+                )
             })
             .collect();
-        let found = self.layout_net.predict(&page.input_img, &units)?;
+        let found = self.layout_net.predict(&page.input_img, &lines)?;
+        let units = found.units;
 
         let mut in_table = vec![false; units.len()];
         let mut elements = Vec::new();
@@ -99,10 +101,10 @@ impl TextLayoutStructure {
             );
         }
         if found.blocks.is_empty() {
-            // The model skips pages with almost no text, whose lines are then the blocks.
-            for &(bbox, text, _) in &lines {
-                let element = LayoutElement::new(bbox.clone(), LayoutElementType::Text, 1.0);
-                elements.push(element.with_text(text));
+            // The model skips pages with almost no text, whose units are then the blocks.
+            for unit in &units {
+                let element = LayoutElement::new(rect(unit.bbox), LayoutElementType::Text, 1.0);
+                elements.push(element.with_text(unit.text.clone()));
             }
         }
         for block in found.blocks {
@@ -114,8 +116,12 @@ impl TextLayoutStructure {
             let class = BLOCK_CLASSES[block.class];
             let kind = element_type(class);
             let text = if kind == LayoutElementType::List {
-                // One item per line.
-                let items: Vec<&str> = block.units.iter().map(|&i| lines[i].1).collect();
+                // One item per unit.
+                let items: Vec<&str> = block
+                    .units
+                    .iter()
+                    .map(|&i| units[i].text.as_str())
+                    .collect();
                 items.join("\n")
             } else {
                 block.text

@@ -1,6 +1,20 @@
 //! LayoutNet inputs: unit features, ruling lines and the page image.
 //!
-//! Each unit has 68 features: 21 of geometry, text and style, 32 Fourier terms of its centre, 8 grid-projection signals, 5 ruling-line flags, then a block id and a leaf id. The projection signals and both ids come from LiteParse's own page projection, which this crate does not have, so they are left in the layout's "no signal" state. Adapted from LiteParse's `table_model/features.rs` (Apache-2.0). See `processors/NOTICE`.
+//! Each unit has 68 features: 21 of geometry, text and style, 32 Fourier terms of its centre, 8 grid-projection signals, 5 ruling-line flags, then a block id and a leaf id. The projection signals and both ids come from the page projection in `projection.rs`. Adapted from LiteParse's `table_model/features.rs` (Apache-2.0). See `processors/NOTICE`.
+
+/// Grid-projection signals of one unit, absent when no projected item matched it.
+#[derive(Clone, Debug, Default)]
+pub struct Proj {
+    /// Text the text features read instead of the unit's own (an OCR faint-token read).
+    pub feat_text: Option<String>,
+    pub flow: f32,
+    pub lc: f32,
+    pub rc: f32,
+    pub cc: f32,
+    pub snap: char,
+    pub block: f32,
+    pub leaf: f32,
+}
 
 /// A text unit with what the features need. `bx` is in the text's reading frame, `pbox` on the
 /// rendered page (they differ only for sideways text); points, top-left origin.
@@ -11,8 +25,7 @@ pub struct FUnit {
     pub text: String,
     pub h: f32,
     pub bold: Option<bool>,
-    /// Text the text features read instead of the unit's own.
-    pub feat_text: Option<String>,
+    pub proj: Option<Proj>,
 }
 
 /// Ruling lines in page points: horizontal `[y, x0, x1]`, vertical `[x, y0, y1]`.
@@ -208,7 +221,11 @@ pub fn unit_features(units: &[FUnit], wh: (f32, f32), rules: Option<&Rules>) -> 
         }
         let cx = (b[i][0] + b[i][2]) / 2.0 / w_pg;
         let cy = (b[i][1] + b[i][3]) / 2.0 / h_pg;
-        let t = units[i].feat_text.as_deref().unwrap_or(&units[i].text);
+        let t = units[i]
+            .proj
+            .as_ref()
+            .and_then(|p| p.feat_text.as_deref())
+            .unwrap_or(&units[i].text);
         let chars: Vec<char> = t.chars().collect();
         let len = chars.len() as f32;
         let n_alpha = chars.iter().filter(|c| c.is_alphabetic()).count() as f32;
@@ -262,16 +279,24 @@ pub fn unit_features(units: &[FUnit], wh: (f32, f32), rules: Option<&Rules>) -> 
             row[k + 3] = (fr * cy).cos();
             k += 4;
         }
-        // The eight projection signals stay zero: no signal.
+        if let Some(p) = &units[i].proj {
+            row[k] = 1.0;
+            row[k + 1] = p.flow;
+            row[k + 2] = p.lc.ln_1p() / 3.0;
+            row[k + 3] = p.rc.ln_1p() / 3.0;
+            row[k + 4] = p.cc.ln_1p() / 3.0;
+            row[k + 5] = (p.snap == 'L') as u8 as f32;
+            row[k + 6] = (p.snap == 'R') as u8 as f32;
+            row[k + 7] = (p.snap == 'C') as u8 as f32;
+        }
         k += 8;
         if let Some(rf) = &rule_f {
             row[k..k + 4].copy_from_slice(&rf[i]);
             row[k + 4] = 1.0;
         }
         k += 5;
-        // Block and leaf ids are unknown.
-        row[k] = -1.0;
-        row[k + 1] = -1.0;
+        row[k] = units[i].proj.as_ref().map_or(-1.0, |p| p.block);
+        row[k + 1] = units[i].proj.as_ref().map_or(-1.0, |p| p.leaf);
     }
     f
 }

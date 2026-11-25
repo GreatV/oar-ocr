@@ -1160,7 +1160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Two things differ from LiteParse, which this model ships with. LayoutNet measures the page in points, so a page image is taken to be a 150 dpi scan, as LiteParse takes images without resolution metadata. LiteParse also feeds LayoutNet signals from its own page projection (column anchors, text flow, block and reading-order ids). OAR has no such projection and leaves those inputs in the model's "no signal" state: on 56 test pages LiteParse's own code then kept 96.6% of the block classes and found 25 of 28 tables in the same place, 13 of them with an identical grid.
+LayoutNet does not read the OCR lines directly. As in LiteParse, which this model ships with, the lines are first projected onto the page grid: neighbours on a line are joined, lines are grouped into blocks and XY-cut regions, and each item records the alignment signals the model was trained with. LayoutNet measures the page in points, so a page image is taken to be a 150 dpi scan, as LiteParse takes images without resolution metadata. LiteParse also re-renders image inputs at 250 dpi before OCR; OAR reads the image as given, so the two can recognize different lines on the same page.
 
 ## OpenThai Markdown and Nemotron Parse
 
