@@ -82,7 +82,7 @@ pub(crate) enum PageFormat {
 
 #[derive(Args)]
 pub(crate) struct Ocr {
-    /// Select a recognition pipeline: OpenThai Text or OCRia-nano-1 (needs --model-dir)
+    /// Select a recognition pipeline: OpenThai Text or OCRia-nano-1
     #[arg(long,value_enum,conflicts_with_all=["size","det","rec","dict"])]
     pub(crate) preset: Option<OcrPreset>,
     /// Load the preset files using upstream names from this directory
@@ -124,7 +124,7 @@ impl From<OcrSize> for PpOcrV6Size {
 
 #[derive(Args)]
 pub(crate) struct Structure {
-    /// Read lines with OCRia-nano-1 and group them with LayoutNet (needs --model-dir)
+    /// Read lines with OCRia-nano-1 and group them with LayoutNet
     #[arg(long, value_enum, conflicts_with_all = ["det", "rec", "dict"])]
     pub(crate) preset: Option<StructurePreset>,
     /// Load the preset files using upstream names from this directory

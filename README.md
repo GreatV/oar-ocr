@@ -26,7 +26,7 @@ Install the standalone tool with `cargo install oar-ocr-cli` (or add `--features
 ```bash
 oar ocr page.png
 oar ocr --preset openthai thai-page.png --device cpu
-oar ocr --preset ocria-nano --model-dir checkpoints/OCRia-nano-1 page.png --device cpu
+oar ocr --preset ocria-nano page.png --device cpu
 oar indra page.png --device cpu
 oar structure page.png -o documents
 oar parse --model PaddlePaddle/PaddleOCR-VL-1.5 page.png
@@ -173,7 +173,7 @@ Both pipelines export the same [page JSON](docs/page-format.md): `page.to_json(w
 
 OpenThai2.0-OCR-Text reads printed Thai and English into ordered lines and word boxes. Its second recognizer handles Latin look-alikes in loopless Thai fonts. [OpenThai usage guide](docs/usage.md#openthai-text)
 
-OCRia-nano-1 reads Latin, CJK, right-to-left and about 17 other scripts on CPU with a line detector, a script router and four recognizers. Its LayoutNet model turns the recognized lines into layout blocks and tables for the structure pipeline. The weights are under the OCRia-nano-1 Model License and are loaded from a directory you download. [OCRia-nano-1 usage guide](docs/usage.md#ocria-nano-1)
+OCRia-nano-1 reads Latin, CJK, right-to-left and about 17 other scripts on CPU with a line detector, a script router and four recognizers. Its LayoutNet model turns the recognized lines into layout blocks and tables for the structure pipeline. The weights are under the OCRia-nano-1 Model License. The CLI downloads them from LlamaIndex's Hugging Face repository, and the library reads a directory you provide. [OCRia-nano-1 usage guide](docs/usage.md#ocria-nano-1)
 
 The classic pipeline runs ONNX models through ONNX Runtime and supports the following model families. See the [pre-trained model guide](docs/models.md) for exact checkpoints, dictionaries, download links, and auto-download names.
 

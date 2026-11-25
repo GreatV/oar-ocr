@@ -1,5 +1,6 @@
 mod args;
 mod indra;
+mod ocria;
 mod parallel;
 mod pdf;
 
@@ -177,12 +178,9 @@ fn run(cli: Cli) -> Result<()> {
                             OAROCRBuilder::openthai_from_dir(dir)
                         }
                         (Some(OcrPreset::Openthai), None) => OAROCRBuilder::openthai(),
-                        (Some(OcrPreset::OcriaNano), Some(dir)) => {
-                            OAROCRBuilder::ocria_nano_from_dir(dir)
+                        (Some(OcrPreset::OcriaNano), dir) => {
+                            OAROCRBuilder::ocria_nano_from_dir(ocria::model_dir(dir.as_deref())?)
                         }
-                        (Some(OcrPreset::OcriaNano), None) => bail!(
-                            "--preset ocria-nano reads the llamaindex/OCRia-nano-1 files from --model-dir"
-                        ),
                         (None, _) => OAROCRBuilder::pp_ocrv6(args.size.into()),
                     },
                     _ => bail!("custom OCR models require --det, --rec, and --dict together"),
@@ -265,12 +263,11 @@ fn run(cli: Cli) -> Result<()> {
                 let builder = match (&args.models.det, &args.models.rec, &args.models.dict) {
                     (Some(det), Some(rec), Some(dict)) => builder.with_ocr(det, rec, dict),
                     (None, None, None) => match (args.preset, &args.model_dir) {
-                        (Some(StructurePreset::OcriaNano), Some(dir)) => {
-                            OARStructureBuilder::ocria_nano_from_dir(dir)
+                        (Some(StructurePreset::OcriaNano), dir) => {
+                            OARStructureBuilder::ocria_nano_from_dir(ocria::model_dir(
+                                dir.as_deref(),
+                            )?)
                         }
-                        (Some(StructurePreset::OcriaNano), None) => bail!(
-                            "--preset ocria-nano reads the llamaindex/OCRia-nano-1 files from --model-dir"
-                        ),
                         (None, _) => builder,
                     },
                     _ => bail!("custom OCR models require --det, --rec, and --dict together"),

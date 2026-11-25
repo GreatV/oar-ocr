@@ -94,7 +94,7 @@ The [OpenThai2.0-OCR-Text v2.1 checkpoint](https://huggingface.co/iapp/OpenThai2
 
 ## OCRia-nano-1
 
-[OCRia-nano-1](https://huggingface.co/llamaindex/OCRia-nano-1/tree/53d45fe6803a568deedb081550c2fdb97cc99f97) is LlamaIndex's document parsing stack for CPU: a line detector, a script router, four CTC recognizers for Latin, CJK, right-to-left and about 17 other scripts, and LayoutNet, a table and layout model that reads the recognized lines. The weights and the files beside them are under the OCRia-nano-1 Model License, which restricts commercial use. They are not in the model registry and are never downloaded automatically: fetch the repository and pass its directory to `OAROCRBuilder::ocria_nano_from_dir` for OCR, or to `OARStructureBuilder::ocria_nano_from_dir` for OCR with layout and tables.
+[OCRia-nano-1](https://huggingface.co/llamaindex/OCRia-nano-1/tree/53d45fe6803a568deedb081550c2fdb97cc99f97) is LlamaIndex's document parsing stack for CPU: a line detector, a script router, four CTC recognizers for Latin, CJK, right-to-left and about 17 other scripts, and LayoutNet, a table and layout model that reads the recognized lines. The weights and the files beside them are under the OCRia-nano-1 Model License, which restricts commercial use. They are not in the model registry and are not mirrored. The `oar` CLI downloads the pinned revision from the publisher's Hugging Face repository. With the library, fetch the repository and pass its directory to `OAROCRBuilder::ocria_nano_from_dir` for OCR, or to `OARStructureBuilder::ocria_nano_from_dir` for OCR with layout and tables.
 
 | Files in the model directory | Role | Model bytes |
 |---|---|---:|

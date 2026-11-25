@@ -60,12 +60,12 @@ The default output joins Thai and English text in page reading order. JSON conta
 ## OCRia-nano-1
 
 ```bash
-oar ocr --preset ocria-nano --model-dir checkpoints/OCRia-nano-1 page.png --device cpu
+oar ocr --preset ocria-nano page.png --device cpu
 oar ocr --preset ocria-nano --model-dir checkpoints/OCRia-nano-1 scan.pdf --format json
-oar structure --preset ocria-nano --model-dir checkpoints/OCRia-nano-1 scan.pdf
+oar structure --preset ocria-nano scan.pdf
 ```
 
-`oar ocr` reads Latin, CJK, right-to-left and other scripts, one line of text per detected line. `oar structure` adds LayoutNet, which groups those lines into headings, paragraphs, lists and tables and writes Markdown or page JSON. `--model-dir` is required: the weights are under the OCRia-nano-1 Model License and are not downloaded automatically. Fetch [llamaindex/OCRia-nano-1](https://huggingface.co/llamaindex/OCRia-nano-1) into that directory first.
+`oar ocr` reads Latin, CJK, right-to-left and other scripts, one line of text per detected line. `oar structure` adds LayoutNet, which groups those lines into headings, paragraphs, lists and tables and writes Markdown or page JSON. Without `--model-dir`, the files are downloaded at a pinned revision from [llamaindex/OCRia-nano-1](https://huggingface.co/llamaindex/OCRia-nano-1), the publisher's Hugging Face repository. They are under the OCRia-nano-1 Model License, which restricts commercial use.
 
 ## Indra OCR
 
