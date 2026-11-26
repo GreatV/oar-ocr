@@ -42,8 +42,6 @@ pub(crate) const INFERENCE_FILES: &[&str] = &[
 
 static FENCE_OPEN_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^```(?:markdown)?\s*\n").expect("static regex"));
-static FENCE_CLOSE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?:^|\n)```\s*$").expect("static regex"));
 
 /// OCRia-1 over the shared Qwen3.5 inference engine.
 pub struct Ocria {
@@ -173,14 +171,35 @@ impl Ocria {
 
 /// Markdown of a page from the model's raw answer: the surrounding ```` ```markdown ```` fence is removed, and an answer cut off before its closing fence keeps everything after the opening one. An answer without the opening fence is returned as it is.
 ///
-/// Only the outer fence is touched, so a page that ends with a fenced block of its own (a Mermaid diagram, code) keeps that block whole.
+/// Only the outer fence is touched. A final fence that closes a block of the page (a Mermaid diagram, code) stays, whether the wrapper's own closing fence follows it or the answer was cut off right there.
 pub fn page_markdown(answer: &str) -> String {
     let answer = answer.trim();
     let Some(open) = FENCE_OPEN_RE.find(answer) else {
         return answer.to_string();
     };
-    FENCE_CLOSE_RE
-        .replace(&answer[open.end()..], "")
+    let body = &answer[open.end()..];
+    // The last line closes the wrapper when it is a bare fence outside every block of the page.
+    let mut in_block = false;
+    let mut wrapper_close = None;
+    let mut start = 0;
+    for line in body.split_inclusive('\n') {
+        wrapper_close = None;
+        // The info string of a fence holds no backtick; a line of inline code does.
+        if let Some(info) = line.trim().strip_prefix("```")
+            && !info.contains('`')
+        {
+            if in_block {
+                in_block = !info.is_empty();
+            } else {
+                in_block = true;
+                if info.is_empty() {
+                    wrapper_close = Some(start);
+                }
+            }
+        }
+        start += line.len();
+    }
+    body[..wrapper_close.unwrap_or(body.len())]
         .trim()
         .to_string()
 }
@@ -200,6 +219,9 @@ mod tests {
         // The first inner closing fence is not the end of the page.
         let page = "A\n\n```mermaid\ngraph TD\n```\n\nB";
         assert_eq!(page_markdown(&format!("```markdown\n{page}\n```\n")), page);
+        // An answer cut off right after a block of the page ends with that block's closing fence.
+        let cut = "A\n\n```mermaid\ngraph TD\n```";
+        assert_eq!(page_markdown(&format!("```markdown\n{cut}")), cut);
         // Without the wrapper, a closing fence belongs to the page.
         assert_eq!(page_markdown("A\n```"), "A\n```");
         assert_eq!(page_markdown("```markdown\n\n```"), "");
