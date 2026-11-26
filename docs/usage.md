@@ -1160,7 +1160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-LayoutNet does not read the OCR lines directly. As in LiteParse, which this model ships with, the lines are first projected onto the page grid: neighbours on a line are joined, lines are grouped into blocks and XY-cut regions, and each item records the alignment signals the model was trained with. LayoutNet measures the page in points, so a page image is taken to be a 150 dpi scan, as LiteParse takes images without resolution metadata. LiteParse also re-renders image inputs at 250 dpi before OCR; OAR reads the image as given, so the two can recognize different lines on the same page.
+LayoutNet does not read the OCR lines directly. As in LiteParse, which this model ships with, the lines are first projected onto the page grid: neighbours on a line are joined, lines are grouped into blocks and XY-cut regions, and each item records the alignment signals the model was trained with. LayoutNet measures the page in points, so a page image is taken to be a 150 dpi scan, as LiteParse takes images without resolution metadata. LiteParse also re-renders image inputs at 250 dpi before OCR; OAR reads the image as given, so the two can recognize different lines on the same page. On a page read sideways or upside down, OAR also turns the page image and its ruling lines upright for LayoutNet, where LiteParse leaves them as scanned; boxes are still reported in the image as given.
 
 ## OCRia-1
 
