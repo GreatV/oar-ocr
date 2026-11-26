@@ -16,6 +16,7 @@ use crate::mineru_diffusion::{MinerUDiffusion, MinerUDiffusionParseOptions};
 use crate::minicpm_ocr::MiniCpmOcr;
 use crate::monkeyocrv2::{MonkeyOcrV2, MonkeyOcrV2ParseOptions};
 use crate::nemotron_parse::NemotronParse;
+use crate::ocria::{Ocria, OcriaParseOptions};
 use crate::ovisocr2::{OvisOcr2, OvisOcr2ParseOptions};
 use crate::ovisocr3::{OvisOcr3, OvisOcr3ParseOptions};
 use crate::oxr::Oxr;
@@ -142,6 +143,8 @@ pub enum AnyPageParserModel {
     TeleOcr,
     /// tencent/Youtu-Parsing-Omni (image and document parsing).
     YoutuParsingOmni,
+    /// llamaindex/OCRia-1. Weights and system prompt are subject to the OCRia-1 Model and Code License.
+    Ocria,
 }
 
 /// The canonical ID table backing [`AnyPageParserModel`] string conversions.
@@ -178,6 +181,7 @@ const MODEL_IDS: &[(&str, AnyPageParserModel)] = &[
         "iapp/OpenThai2.0-OCR-Markdown",
         AnyPageParserModel::OpenThaiMarkdown,
     ),
+    ("llamaindex/OCRia-1", AnyPageParserModel::Ocria),
     ("ATH-MaaS/OvisOCR2", AnyPageParserModel::OvisOcr2),
     ("ATH-MaaS/OvisOCR3", AnyPageParserModel::OvisOcr3),
     ("SoMarkAI/OXR-1.0", AnyPageParserModel::Oxr),
@@ -226,6 +230,7 @@ impl AnyPageParserModel {
             Self::MonkeyOcrV2B => "zenosai/MonkeyOCRv2-B-Parsing",
             Self::Nemotron35Parse => "nvidia/Nemotron-3.5-Parse",
             Self::OpenThaiMarkdown => "iapp/OpenThai2.0-OCR-Markdown",
+            Self::Ocria => "llamaindex/OCRia-1",
             Self::OvisOcr2 => "ATH-MaaS/OvisOCR2",
             Self::OvisOcr3 => "ATH-MaaS/OvisOCR3",
             Self::Oxr => "SoMarkAI/OXR-1.0",
@@ -357,6 +362,8 @@ pub enum AnyPageParser {
     OvisOcr2(Box<OvisOcr2>),
     /// OvisOCR3 end-to-end Markdown page parsing.
     OvisOcr3(Box<OvisOcr3>),
+    /// OCRia-1 end-to-end Markdown page parsing.
+    Ocria(Box<Ocria>),
     /// OXR recognition over PP-DocLayout regions; the official D-FINE is not used.
     Oxr(Box<LayoutPageParser<PpDocLayout, Oxr>>),
     /// Unlimited-OCR-2 end-to-end page parsing.
@@ -426,6 +433,12 @@ impl From<NemotronParse> for AnyPageParser {
 impl From<OvisOcr2> for AnyPageParser {
     fn from(model: OvisOcr2) -> Self {
         Self::OvisOcr2(Box::new(model))
+    }
+}
+
+impl From<Ocria> for AnyPageParser {
+    fn from(model: Ocria) -> Self {
+        Self::Ocria(Box::new(model))
     }
 }
 
@@ -565,6 +578,7 @@ impl AnyPageParser {
             AnyPageParserModel::Nemotron35Parse | AnyPageParserModel::OpenThaiMarkdown => {
                 NemotronParse::from_dir(model_dir, device)?.into()
             }
+            AnyPageParserModel::Ocria => Ocria::from_dir(model_dir, device)?.into(),
             AnyPageParserModel::OvisOcr2 => OvisOcr2::from_dir(model_dir, device)?.into(),
             AnyPageParserModel::OvisOcr3 => OvisOcr3::from_dir(model_dir, device)?.into(),
             AnyPageParserModel::Oxr => LayoutPageParser::new(
@@ -616,7 +630,7 @@ impl AnyPageParser {
     /// against the hashes the source API publishes, and the snapshot is
     /// published only once complete. The layout checkpoint uses its source's
     /// default revision.
-    /// OpenThai Markdown and Nemotron Parse default to pinned Hugging Face releases. Other models default to ModelScope. The
+    /// OpenThai Markdown, Nemotron Parse and OCRia-1 default to pinned Hugging Face releases. Other models default to ModelScope. The
     /// layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR, MiniCPM-OCR, OXR) also download
     /// a PP-DocLayout checkpoint (DEFAULT_LAYOUT_REPO by default) unless the
     /// options point at a local layout directory. Loading then goes
@@ -643,13 +657,23 @@ impl AnyPageParser {
         options: &AnyPageParserPretrainedOptions,
     ) -> Result<Self, Error> {
         use crate::api::download::DownloadSource;
-        let release = match model {
-            AnyPageParserModel::Nemotron35Parse => Some("ea2e1fe486bea3e7d0d505df9bafa4ad562407a0"),
-            AnyPageParserModel::OpenThaiMarkdown => {
-                Some("b6d9c95c9542de44ab03744d56b841ed212035e3")
-            }
+        // A pinned release comes from its publisher's Hugging Face repository with the files inference reads.
+        let pinned = match model {
+            AnyPageParserModel::Nemotron35Parse => Some((
+                "ea2e1fe486bea3e7d0d505df9bafa4ad562407a0",
+                crate::nemotron_parse::INFERENCE_FILES,
+            )),
+            AnyPageParserModel::OpenThaiMarkdown => Some((
+                "b6d9c95c9542de44ab03744d56b841ed212035e3",
+                crate::nemotron_parse::INFERENCE_FILES,
+            )),
+            AnyPageParserModel::Ocria => Some((
+                "489f5fa8f63858545368b9aff44256bbea6e46bc",
+                crate::ocria::INFERENCE_FILES,
+            )),
             _ => None,
         };
+        let release = pinned.map(|(commit, _)| commit);
         let source = match (options.source, release) {
             (None, Some(_)) => DownloadSource::HuggingFace,
             _ => options.source(),
@@ -658,17 +682,12 @@ impl AnyPageParser {
             DownloadSource::HuggingFace => options.revision.as_deref().or(release),
             DownloadSource::ModelScope => options.revision.as_deref(),
         };
-        let model_dir =
-            if release.is_some() && revision == release && source == DownloadSource::HuggingFace {
-                crate::api::download::snapshot_with_files(
-                    source,
-                    model.as_str(),
-                    revision,
-                    crate::nemotron_parse::INFERENCE_FILES,
-                )?
-            } else {
-                crate::api::download::snapshot(source, model.as_str(), revision)?
-            };
+        let model_dir = match pinned {
+            Some((_, files)) if revision == release && source == DownloadSource::HuggingFace => {
+                crate::api::download::snapshot_with_files(source, model.as_str(), revision, files)?
+            }
+            _ => crate::api::download::snapshot(source, model.as_str(), revision)?,
+        };
         let mut load_options = AnyPageParserLoadOptions::default()
             .with_glm_options(options.glm.clone())
             .with_jina_options(options.jina.clone());
@@ -746,6 +765,7 @@ impl PageParser for AnyPageParser {
             Self::NemotronParse(model) => model.parse_page(image, options),
             Self::OvisOcr2(model) => model.parse_page(image, &ovisocr2_options(options)),
             Self::OvisOcr3(model) => model.parse_page(image, &ovisocr3_options(options)),
+            Self::Ocria(model) => model.parse_page(image, &ocria_options(options)),
             Self::Oxr(model) => model.parse_page(image, &layout_options(model, options)),
             Self::UnlimitedOcr(model) => model.parse_page(image, &unlimited_ocr_options(options)),
             Self::WeVisDoc(model) => model.parse_page(image, &wevisdoc_options(options)),
@@ -825,6 +845,14 @@ fn ovisocr2_options(options: &AnyPageParserOptions) -> OvisOcr2ParseOptions {
 
 fn ovisocr3_options(options: &AnyPageParserOptions) -> OvisOcr3ParseOptions {
     let mut model_options = OvisOcr3ParseOptions::default();
+    if let Some(max_new_tokens) = options.max_new_tokens {
+        model_options.max_new_tokens = max_new_tokens;
+    }
+    model_options
+}
+
+fn ocria_options(options: &AnyPageParserOptions) -> OcriaParseOptions {
+    let mut model_options = OcriaParseOptions::default();
     if let Some(max_new_tokens) = options.max_new_tokens {
         model_options.max_new_tokens = max_new_tokens;
     }
@@ -1041,6 +1069,10 @@ mod tests {
 
         assert_eq!(wevisdoc_options(&unified).max_new_tokens, 777);
         assert_eq!(xiaomi_options(&unified).max_new_tokens, 777);
+
+        let produced = ocria_options(&unified);
+        assert_eq!(produced.max_new_tokens, 777);
+        assert_eq!(produced.max_pixels, OcriaParseOptions::default().max_pixels);
     }
 
     struct EmptyLayout;

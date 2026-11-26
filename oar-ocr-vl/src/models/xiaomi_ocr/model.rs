@@ -242,6 +242,20 @@ impl XiaomiOcr {
         image: &RgbImage,
         instruction: &str,
         max_new_tokens: usize,
+        step_top: Option<&mut Vec<[(u32, f32); 3]>>,
+    ) -> Result<Vec<u32>, Error> {
+        self.generate_request(image, None, instruction, max_new_tokens, step_top)
+    }
+
+    /// Greedy generation for one image under a chat request: an optional
+    /// system message, then a user turn holding the image and `instruction`
+    /// (which may be empty).
+    pub(crate) fn generate_request(
+        &self,
+        image: &RgbImage,
+        system: Option<&str>,
+        instruction: &str,
+        max_new_tokens: usize,
         mut step_top: Option<&mut Vec<[(u32, f32); 3]>>,
     ) -> Result<Vec<u32>, Error> {
         self.text.clear_cache();
@@ -264,7 +278,7 @@ impl XiaomiOcr {
             &self.device,
             self.dtype,
         )?;
-        let prompt = build_prompt(instruction, image_inputs.num_image_tokens);
+        let prompt = build_prompt(system, instruction, image_inputs.num_image_tokens);
         let encoding = self
             .tokenizer
             .encode(prompt, false)
@@ -514,11 +528,20 @@ fn validate_generation_length(
     Ok(())
 }
 
-/// Frame an instruction the way the official chat template does for a
-/// non-thinking request: one image span, the instruction text, and the empty
-/// think block before the assistant turn.
-fn build_prompt(instruction: &str, num_image_tokens: usize) -> String {
-    let mut prompt = String::with_capacity(instruction.len() + num_image_tokens * 13 + 128);
+/// Frame a request the way the official chat template does with thinking
+/// off: the system message when there is one, one image span, the instruction
+/// text, and the empty think block before the assistant turn. The template
+/// trims the content of every message.
+fn build_prompt(system: Option<&str>, instruction: &str, num_image_tokens: usize) -> String {
+    let system = system.map(str::trim);
+    let mut prompt = String::with_capacity(
+        system.map_or(0, str::len) + instruction.len() + num_image_tokens * 13 + 160,
+    );
+    if let Some(system) = system {
+        prompt.push_str("<|im_start|>system\n");
+        prompt.push_str(system);
+        prompt.push_str("<|im_end|>\n");
+    }
     prompt.push_str("<|im_start|>user\n<|vision_start|>");
     for _ in 0..num_image_tokens {
         prompt.push_str("<|image_pad|>");
@@ -772,11 +795,16 @@ mod tests {
 
     #[test]
     fn official_prompts_frame_the_document_instruction() {
-        let prompt = build_prompt(DEFAULT_PROMPT, 2);
+        let prompt = build_prompt(None, DEFAULT_PROMPT, 2);
         assert!(prompt.starts_with(
             "<|im_start|>user\n<|vision_start|><|image_pad|><|image_pad|><|vision_end|>Extract"
         ));
         assert!(prompt.ends_with("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+        // A system message comes first, trimmed, and the user turn may hold the image alone.
+        assert_eq!(
+            build_prompt(Some("  Transcribe the page.\n"), "", 1),
+            "<|im_start|>system\nTranscribe the page.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        );
         assert_eq!(TEXT_REGION_PROMPT, "Extract the text in the image.");
         assert_eq!(
             TABLE_REGION_PROMPT,

@@ -255,10 +255,11 @@ impl XiaomiOcrVisionConfig {
     }
 
     pub fn validate(&self) -> Result<(), Error> {
-        if self.model_type != "qwen3_5_vision" {
+        // OCRia-1 tags the same tower `qwen3_5`.
+        if self.model_type != "qwen3_5_vision" && self.model_type != "qwen3_5" {
             return Err(Error::Config {
                 message: format!(
-                    "Xiaomi-OCR-0 expected vision model_type 'qwen3_5_vision', got '{}'",
+                    "Xiaomi-OCR-0 expected vision model_type 'qwen3_5_vision' or 'qwen3_5', got '{}'",
                     self.model_type
                 ),
             });

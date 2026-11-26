@@ -10,6 +10,7 @@ const MODEL_MODULES: &[&str] = &[
     "mineru_diffusion",
     "minicpm_ocr",
     "monkeyocrv2",
+    "ocria",
     "ovisocr2",
     "ovisocr3",
     "oxr",
@@ -71,8 +72,11 @@ fn validate_architecture() {
             if model_owner == Some(*model) {
                 continue;
             }
-            // OvisOCR3 is a prompt/protocol wrapper around the OvisOCR2 engine.
-            if model_owner == Some("ovisocr3") && *model == "ovisocr2" {
+            // OvisOCR3 is a prompt/protocol wrapper around the OvisOCR2 engine, and OCRia-1 around the Xiaomi-OCR-0 one.
+            if matches!(
+                (model_owner, *model),
+                (Some("ovisocr3"), "ovisocr2") | (Some("ocria"), "xiaomi_ocr")
+            ) {
                 continue;
             }
             let dependency = format!("crate::{model}::");

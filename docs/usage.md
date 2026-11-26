@@ -1162,6 +1162,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 LayoutNet does not read the OCR lines directly. As in LiteParse, which this model ships with, the lines are first projected onto the page grid: neighbours on a line are joined, lines are grouped into blocks and XY-cut regions, and each item records the alignment signals the model was trained with. LayoutNet measures the page in points, so a page image is taken to be a 150 dpi scan, as LiteParse takes images without resolution metadata. LiteParse also re-renders image inputs at 250 dpi before OCR; OAR reads the image as given, so the two can recognize different lines on the same page.
 
+## OCRia-1
+
+[OCRia-1](https://huggingface.co/llamaindex/OCRia-1) is the 4B vision-language model of the OCRia family: it reads a page image and writes Markdown with HTML tables, charts as data tables, LaTeX formulas and Mermaid diagrams. The explicit ID `llamaindex/OCRia-1` selects it through `AnyPageParser` and `oar parse --model llamaindex/OCRia-1`; a GPU is recommended.
+
+```rust
+use candle_core::Device;
+use oar_ocr_vl::utils::image::load_image;
+use oar_ocr_vl::{Ocria, OcriaParseOptions, PageParser};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model = Ocria::from_dir("llamaindex/OCRia-1", Device::new_cuda(0)?)?;
+    let page = model.parse_page(&load_image("document.png")?, &OcriaParseOptions::default())?;
+    println!("{}", page.markdown.unwrap_or_default());
+    Ok(())
+}
+```
+
+Pages above 4.1 megapixels are downscaled to that budget, and `OcriaParseOptions::with_max_pixels` changes it. The weights are under the OCRia-1 Model and Code License, which restricts commercial use. See the [crate guide](../oar-ocr-vl/README.md#ocria-1) for the protocol and the license terms.
+
 ## OpenThai Markdown and Nemotron Parse
 
 Run single-pass document parsing with the checkpoint's repository ID. Each result contains the generated token stream, ordered blocks with content-normalized boxes, rendered Markdown and table conversion diagnostics. Native tables render as HTML so merged cells retain their row and column spans.

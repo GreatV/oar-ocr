@@ -210,6 +210,7 @@ The [`oar-ocr-vl`](oar-ocr-vl/README.md) crate provides native [Candle](https://
 | [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) | 0.7B | Higher-capacity ViT-B variant with the same parsing and recognition tasks |
 | [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) | 0.6B | Two-stage page parsing, dewarp, layout, text, formula, and OTSL-table recognition |
 | [Nemotron-3.5-Parse](https://huggingface.co/nvidia/Nemotron-3.5-Parse) | 0.63B | Visual-prefix document parsing with content-normalized boxes |
+| [OCRia-1](https://huggingface.co/llamaindex/OCRia-1) | 4B | Model-native full-page document-to-Markdown parsing: HTML tables, charts as data tables, LaTeX formulas, Mermaid diagrams (Qwen3.5-4B; restricted license) |
 | [OpenThai2.0-OCR-Markdown](https://huggingface.co/iapp/OpenThai2.0-OCR-Markdown) | 0.63B | Printed Thai and English pages with ordered blocks, Markdown and HTML tables |
 | [OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) | 0.8B | Model-native full-page document-to-Markdown parsing |
 | [OvisOCR3](https://huggingface.co/ATH-MaaS/OvisOCR3) | 0.8B | Model-native Markdown or structured page parsing, text, formula, HTML table, and chart recognition |
@@ -223,13 +224,15 @@ The [`oar-ocr-vl`](oar-ocr-vl/README.md) crate provides native [Candle](https://
 | [Xiaomi-OCR-0](https://huggingface.co/SeerRay-Lab/Xiaomi-OCR-0) | 0.8B | Model-native full-page document-to-Markdown parsing (Qwen3.5; tables as OTSL converted to HTML) |
 | [Youtu-Parsing-Omni](https://huggingface.co/tencent/Youtu-Parsing-Omni) | 5B | Native image/document parsing to structured JSON, layout blocks, and Markdown (Youtu omni encoder and MLA decoder) |
 
-PaddleOCR-VL variants, GLM-OCR, TeleOCR, MiniCPM-OCR, OXR, jina-ocr-v1, and WeVisDoc integrate with the external-layout [`DocParser`](oar-ocr-vl/README.md#document-parsing-pipeline). OvisOCR2, OvisOCR3, WeVisDoc, Xiaomi-OCR-0, HPD-Parsing, Youtu-Parsing-Omni, and the MonkeyOCRv2 S/B parsing models also provide model-native full-page paths. Unlimited-OCR-2 parses whole pages, alone or several per request, through its model-native path only. HunyuanOCR and the MinerU models also use their model-native parsing pipelines.
+PaddleOCR-VL variants, GLM-OCR, TeleOCR, MiniCPM-OCR, OXR, jina-ocr-v1, and WeVisDoc integrate with the external-layout [`DocParser`](oar-ocr-vl/README.md#document-parsing-pipeline). OvisOCR2, OvisOCR3, WeVisDoc, Xiaomi-OCR-0, OCRia-1, HPD-Parsing, Youtu-Parsing-Omni, and the MonkeyOCRv2 S/B parsing models also provide model-native full-page paths. Unlimited-OCR-2 parses whole pages, alone or several per request, through its model-native path only. HunyuanOCR and the MinerU models also use their model-native parsing pipelines.
 
 `PageParser::parse_document` returns a `DocumentOutput` with pages and document Markdown. Unlimited-OCR-2 uses one joint request with tiled views by default; HunyuanOCR 1.5 and OvisOCR3 offer explicit joint-generation methods. See the [page and document API guide](oar-ocr-vl/README.md#unified-page-parsing).
 
 MiniCPM-OCR uses the explicit repository ID `openbmb/MiniCPM-OCR-1.0` through `AnyPageParser` and, like its official SDK, reads the regions PP-DocLayoutV3 detects; see the [MiniCPM-OCR guide](oar-ocr-vl/README.md#minicpm-ocr-10).
 
 OXR uses the explicit repository ID `SoMarkAI/OXR-1.0` through `AnyPageParser`. PP-DocLayout supplies regions, and OXR predicts their reading order with its grounding prompt by default. `Oxr::with_reading_order(false)` selects detector order. See the [OXR guide](oar-ocr-vl/README.md#oxr-10) for details and weight-license terms.
+
+OCRia-1 uses the explicit repository ID `llamaindex/OCRia-1` through `AnyPageParser` and runs on the Xiaomi-OCR-0 engine with the system prompt shipped in its model directory. See the [OCRia-1 guide](oar-ocr-vl/README.md#ocria-1) for the page budget and weight-license terms.
 
 Chart-region recognition is opt-in through `PaddleOcrVl::with_chart_recognition(true)`. GLM-OCR defaults to repetition penalty 1.1, and HunyuanOCR page parsing selects the loaded version's official prompt. See the [VL usage guide](oar-ocr-vl/README.md#usage) for model defaults and controls.
 
