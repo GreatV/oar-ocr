@@ -2537,7 +2537,8 @@ fn xy_find_best_cut(
         let b1_f = ((c1 - origin) / bucket_pt).ceil();
         let b0 = b0_f.max(0.0) as usize;
         let b1 = (b1_f.max(b0_f + 1.0) as usize).min(n_buckets);
-        for slot in &mut density[b0..b1] {
+        // An item or figure past the box's far edge starts after the last bucket and adds nothing.
+        for slot in &mut density[b0.min(b1)..b1] {
             *slot += weight;
         }
     }
@@ -2564,7 +2565,7 @@ fn xy_find_best_cut(
         let b1_f = ((c1 - origin) / bucket_pt).ceil();
         let b0 = b0_f.max(0.0) as usize;
         let b1 = (b1_f.max(b0_f + 1.0) as usize).min(n_buckets);
-        for slot in &mut density[b0..b1] {
+        for slot in &mut density[b0.min(b1)..b1] {
             *slot += weight;
         }
     }
@@ -4151,5 +4152,35 @@ mod tests {
             let b = [40.0, 90.0, 120.0, 16.0];
             assert_eq!(unturn(turn_box(b, turn, page), turn, page), b);
         }
+    }
+
+    #[test]
+    fn a_cut_search_skips_an_item_past_the_far_edge_of_its_box() {
+        let item = |y: f32| ProjectedTextItem {
+            item: TextItem {
+                text: "word".to_string(),
+                y,
+                width: 40.0,
+                height: 10.0,
+                ..Default::default()
+            },
+            is_margin_line_number: false,
+            rotated: false,
+            d: 0.0,
+            orig_x: 0.0,
+            orig_y: y,
+            orig_width: 40.0,
+            orig_height: 10.0,
+        };
+        // The second item starts beyond the box, past the last density bucket.
+        let items = [item(0.0), item(500.0)];
+        let bbox = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        let cut = xy_find_best_cut(&items, &[0, 1], &bbox, CutAxis::Horizontal, 10.0, &[]);
+        assert!(cut.is_none());
     }
 }
