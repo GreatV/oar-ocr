@@ -11,6 +11,7 @@ use crate::core::inference::{ModelSource, OrtInfer};
 use decode::{DUnit, DecodeOptions, Grid, GridCell};
 use features::{FUnit, PageImage};
 use image::RgbImage;
+use std::borrow::Cow;
 
 /// Side of the square canvas the image branch reads.
 const IMG_SIDE: usize = 1024;
@@ -304,7 +305,7 @@ impl LayoutNetModel {
 
     /// Find the tables and layout blocks of a page from its recognized lines.
     ///
-    /// The lines are first projected onto the page grid, which joins neighbours on a line and measures the alignment signals the model was trained with. The page is taken to be a 150 dpi scan. A page with fewer than 2 or more than 1500 projected units, or under 20 characters of text, returns no tables or blocks.
+    /// The lines are first projected onto the page grid, which joins neighbours on a line and measures the alignment signals the model was trained with. The page is taken to be a 150 dpi scan. A page read sideways or upside down is turned upright for the model, and the boxes returned are in the image as given. A page with fewer than 2 or more than 1500 projected units, or under 20 characters of text, returns no tables or blocks.
     pub fn predict(
         &self,
         image: &RgbImage,
@@ -345,7 +346,12 @@ impl LayoutNetModel {
             .collect();
         let (projected, turn, frame) = projection::project_ocr_page(page, items);
 
-        // Units in page points: f64 for decoding, f32 for the features. A page read after a quarter turn keeps the page's size, as in the reference.
+        // The units of a page read sideways or upside down are in its reading frame, so the image and the rules found in it go there too. The reference leaves them as scanned, which costs it the tables and most blocks of such a page.
+        let source_size = (width as f32, height as f32);
+        let image = reading_frame_image(image, turn);
+        let (width, height) = image.dimensions();
+
+        // Units in page points: f64 for decoding, f32 for the features.
         let wh = (
             f64::from(width) * POINTS_PER_PIXEL,
             f64::from(height) * POINTS_PER_PIXEL,
@@ -403,7 +409,7 @@ impl LayoutNetModel {
             return Ok(LayoutNetOutput {
                 units,
                 turn,
-                size: (width as f32, height as f32),
+                size: source_size,
                 ..Default::default()
             });
         }
@@ -577,8 +583,18 @@ impl LayoutNetModel {
             blocks,
             units,
             turn,
-            size: (width as f32, height as f32),
+            size: source_size,
         })
+    }
+}
+
+/// The page image in the reading frame of a page read at `turn` quarter turns, where `projection::turn_box` puts its boxes.
+fn reading_frame_image(image: &RgbImage, turn: usize) -> Cow<'_, RgbImage> {
+    match turn {
+        1 => Cow::Owned(image::imageops::rotate90(image)),
+        2 => Cow::Owned(image::imageops::rotate180(image)),
+        3 => Cow::Owned(image::imageops::rotate270(image)),
+        _ => Cow::Borrowed(image),
     }
 }
 
@@ -845,6 +861,21 @@ fn is_chart(grid: &Grid) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_turned_page_image_follows_its_boxes() {
+        let mut page = RgbImage::new(6, 4);
+        page.put_pixel(1, 3, image::Rgb([255, 0, 0]));
+        for turn in 0..4 {
+            let turned = reading_frame_image(&page, turn);
+            let [x, y, _, _] = projection::turn_box([1.0, 3.0, 1.0, 1.0], turn, (6.0, 4.0));
+            assert_eq!(
+                turned.get_pixel(x as u32, y as u32).0,
+                [255, 0, 0],
+                "turn {turn}"
+            );
+        }
+    }
 
     fn cell(r0: usize, c0: usize, r1: usize, c1: usize, text: &str) -> GridCell {
         GridCell {
