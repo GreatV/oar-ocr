@@ -19,6 +19,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) | 0.7B | Higher-capacity ViT-B variant with the same parsing and recognition tasks |
 | [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) | 0.6B | Model-native layout, end-to-end parsing, text, formula, and OTSL-table recognition |
 | [Nemotron-3.5-Parse](https://huggingface.co/nvidia/Nemotron-3.5-Parse) | 0.63B | Visual-prefix document parsing with content-normalized boxes |
+| [OCRia-1](https://huggingface.co/llamaindex/OCRia-1) | 4B | Model-native full-page document-to-Markdown parsing: HTML tables, charts as data tables, LaTeX formulas, Mermaid diagrams (Qwen3.5-4B; restricted license) |
 | [OpenThai2.0-OCR-Markdown](https://huggingface.co/iapp/OpenThai2.0-OCR-Markdown) | 0.63B | Printed Thai and English pages with ordered blocks, Markdown and HTML tables |
 | [OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) | 0.8B | Model-native full-page document-to-Markdown parsing |
 | [OvisOCR3](https://huggingface.co/ATH-MaaS/OvisOCR3) | 0.8B | Model-native Markdown or structured page parsing, text, formula, HTML table, and chart recognition |
@@ -94,7 +95,7 @@ let options = AnyPageParserOptions::default().with_max_new_tokens(8192);
 let page = parser.parse_page(&image, &options)?;
 ```
 
-Construct it from an already-loaded model with `From`: the model-native parsers (`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`, `MonkeyOcrV2`, `OvisOcr2`, `UnlimitedOcr`, `WeVisDoc`, `XiaomiOcr`, `YoutuParsingOmni`) and `LayoutPageParser` compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`, `MiniCpmOcr`, `Oxr`). `AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens` maps to each model's generation budget (including `MinerUDiffusion`'s `gen_length`), and `region_batch_size` applies to the region-batching parsers (`MinerU` and the layout-composed models); parsers without a matching concept ignore the knob. OXR handles regions one at a time and first predicts their reading order with its own page request; `Oxr::with_reading_order(false)` keeps the detector order instead. Code and chemical-structure regions use OXR's dedicated prompts. The layout detector is any `LayoutSource`; the built-in loader uses PP-DocLayout.
+Construct it from an already-loaded model with `From`: the model-native parsers (`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`, `MonkeyOcrV2`, `Ocria`, `OvisOcr2`, `UnlimitedOcr`, `WeVisDoc`, `XiaomiOcr`, `YoutuParsingOmni`) and `LayoutPageParser` compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`, `MiniCpmOcr`, `Oxr`). `AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens` maps to each model's generation budget (including `MinerUDiffusion`'s `gen_length`), and `region_batch_size` applies to the region-batching parsers (`MinerU` and the layout-composed models); parsers without a matching concept ignore the knob. OXR handles regions one at a time and first predicts their reading order with its own page request; `Oxr::with_reading_order(false)` keeps the detector order instead. Code and chemical-structure regions use OXR's dedicated prompts. The layout detector is any `LayoutSource`; the built-in loader uses PP-DocLayout.
 
 `AnyPageParser::from_dir` loads a named parser from a model directory. The model is always named explicitly by its Hugging Face repo ID (`tencent/HunyuanOCR`, `PaddlePaddle/PaddleOCR-VL-1.5`, …) — most supported models are fine-tunes whose checkpoint configs match their public base models, so the directory cannot identify the model reliably on its own. Each model then loads through its own `from_dir` with its own defaults:
 
@@ -360,6 +361,32 @@ println!("{markdown}");
 The processor resizes RGB input with bicubic antialiasing to a 32-pixel-aligned area between the advertised bounds (`256²`–`4096²` pixels). The official prompts cover whole-page parsing, text regions, OTSL tables, LaTeX formulas, and key-information extraction (see the `xiaomi_ocr` module constants); as a `RecognitionBackend`, tables come back in OTSL and are converted to HTML by the pipeline, and chart regions are left unrecognized because the model defines no chart prompt.
 
 Requests use the model card's image-before-text chat layout, while the evaluation pipelines put the instruction before the image. Native Markdown uses the shared HTML-escaping OTSL converter, while the evaluation pipelines use their own unescaped converter and two-stage region assembly.
+
+### OCRia-1
+
+OCRia-1 is a Qwen3.5-4B fine-tune that reads one page image and writes Markdown, with tables as HTML, charts as HTML data tables, formulas as LaTeX and diagrams as Mermaid. Use the explicit repository ID `llamaindex/OCRia-1`. The checkpoint is a plain `Qwen3_5ForConditionalGeneration`, so it runs on the Xiaomi-OCR-0 engine; the protocol follows the model card: the system prompt in the model directory's `prompt.txt`, an image-only user turn, thinking off and greedy decoding up to 24,576 tokens.
+
+OCRia-1 weights and `prompt.txt` are under the [OCRia-1 Model and Code License](https://huggingface.co/llamaindex/OCRia-1/blob/main/LICENSE): free for research and personal use and for organizations under $2M in annual revenue and in total funding; a commercial license is needed above that and for any document parsing, OCR or extraction product that competes with LlamaParse or LlamaCloud. Users must accept these terms before using the weights. Nothing from the model repository is embedded or mirrored here: load a local directory as below, or use `AnyPageParser::from_pretrained` with the `auto-download` feature to fetch the pinned release from LlamaIndex's Hugging Face repository.
+
+```rust
+use oar_ocr_vl::ocria::DEFAULT_MAX_NEW_TOKENS;
+use oar_ocr_vl::utils::image::load_image;
+use oar_ocr_vl::utils::parse_device;
+use oar_ocr_vl::Ocria;
+
+let image = load_image("document.png")?;
+let model = Ocria::from_dir("llamaindex/OCRia-1", parse_device("cuda:0")?)?;
+let markdown = model
+    .parse(&[image], DEFAULT_MAX_NEW_TOKENS)?
+    .into_iter()
+    .next()
+    .expect("one result")?;
+println!("{markdown}");
+```
+
+`generate` returns the raw answer, which the model wraps in a `markdown` code fence; `parse` and `PageParser` remove that outer fence and keep everything else, including the `<page_header>`, `<page_footer>`, `<page_number>` and `<watermark>` tags and the `![label: description]` image markers. `PageParser` first downscales a page above 4.1 megapixels (about 210 dpi for a letter page) with Lanczos, the budget of the published benchmark numbers; `OcriaParseOptions::with_max_pixels` changes or removes it. Direct generation uses the checkpoint's image bounds (`256²`–`4096²` pixels), so a 300-dpi page costs about twice the image tokens.
+
+The layout-box code shipped in the model repository (`ocria_grounding`) is not ported, and neither is the benchmark provider's scoring clean-up, which drops image markers, diagrams and page furniture.
 
 ### Youtu-Parsing-Omni
 

@@ -20,6 +20,7 @@
 //!   DeepEncoder over a DeepSeek-V2 MoE decoder)
 //! - `teleocr` - TeleOCR document parsing VLM (Qwen2.5-VL backbone
 //!   with a windowed vision tower)
+//! - `ocria` - OCRia-1 end-to-end page-to-Markdown parser (Qwen3.5-4B, on the Xiaomi-OCR-0 engine)
 //! - `ovisocr2` - OvisOCR2 end-to-end page-to-Markdown parser (Qwen3.5)
 //! - `ovisocr3` - OvisOCR3 Markdown, structured-page, and region recognition (Qwen3.5)
 //! - `oxr` - SoMark OXR-1.0 region recognition and PP-DocLayout page parsing
@@ -95,6 +96,8 @@ pub mod minicpm_ocr;
 pub mod monkeyocrv2;
 #[path = "models/nemotron_parse/mod.rs"]
 pub mod nemotron_parse;
+#[path = "models/ocria/mod.rs"]
+pub mod ocria;
 #[path = "models/ovisocr2/mod.rs"]
 pub mod ovisocr2;
 #[path = "models/ovisocr3/mod.rs"]
@@ -138,6 +141,7 @@ pub use mineru_diffusion::{
 };
 pub use minicpm_ocr::{MiniCpmOcr, MiniCpmOcrGenerationOptions, MiniCpmOcrTask};
 pub use monkeyocrv2::{MonkeyOcrV2, MonkeyOcrV2ParseOptions, MonkeyOcrV2Task};
+pub use ocria::{Ocria, OcriaParseOptions};
 pub use ovisocr2::{OvisOcr2, OvisOcr2ParseOptions};
 pub use ovisocr3::{OvisOcr3, OvisOcr3ParseMode, OvisOcr3ParseOptions};
 pub use oxr::{Oxr, OxrGenerationOptions, OxrTask};

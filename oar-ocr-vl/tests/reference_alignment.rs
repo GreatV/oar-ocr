@@ -1,12 +1,14 @@
-//! Numerical alignment of Xiaomi-OCR-0, MinerU2.5, TeleOCR and PaddleOCR-VL
-//! against their transformers references.
+//! Numerical alignment of Xiaomi-OCR-0, OCRia-1, MinerU2.5, TeleOCR and
+//! PaddleOCR-VL against their transformers references.
 //!
 //! Each fixture is produced out of tree with transformers, loading the same
 //! checkpoint in float32 with eager attention on CPU (TeleOCR and
 //! PaddleOCR-VL through the checkpoint's own remote code, which needs
 //! transformers 4.57), and building the inputs through the checkpoint's
 //! Pillow image processor (`use_fast=False`) and chat template with the
-//! instruction the test passes. Use a lossless PNG input so both sides
+//! instruction the test passes (for OCRia-1 the system prompt in the model
+//! directory's `prompt.txt` and an image-only user turn, with
+//! `enable_thinking=False`). Use a lossless PNG input so both sides
 //! decode identical pixels. The first-step logits come from a plain
 //! forward pass (`model(**inputs).logits[0, -1]`) and the token ids from
 //! greedy `generate(do_sample=False, max_new_tokens=16)`, keeping the
@@ -15,8 +17,8 @@
 //! `first_step_top3` (`[token_id, logit]` triples), and `generated_ids`.
 //!
 //! Every test reads `<PREFIX>_MODEL_DIR` and `<PREFIX>_ALIGNMENT_FIXTURE`
-//! and skips when either is unset; the prefixes are `XIAOMIOCR`, `MINERU`,
-//! `TELEOCR` and `PADDLEOCRVL`:
+//! and skips when either is unset; the prefixes are `XIAOMIOCR`, `OCRIA`,
+//! `MINERU`, `TELEOCR` and `PADDLEOCRVL`:
 //!
 //! ```bash
 //! MINERU_MODEL_DIR=<model_dir> \
@@ -130,6 +132,19 @@ fn xiaomi_ocr() {
     let model = XiaomiOcr::from_dir_with_runtime(&case.model_dir, Case::runtime()).expect("load");
     let trace = model
         .generate_traced(&case.image, DEFAULT_PROMPT, case.budget())
+        .expect("traced generation");
+    case.assert_matches(&trace.tokens, &trace.step_top);
+}
+
+#[test]
+fn ocria() {
+    use oar_ocr_vl::Ocria;
+    let Some(case) = Case::load("OCRIA") else {
+        return;
+    };
+    let model = Ocria::from_dir_with_runtime(&case.model_dir, Case::runtime()).expect("load");
+    let trace = model
+        .generate_traced(&case.image, case.budget())
         .expect("traced generation");
     case.assert_matches(&trace.tokens, &trace.step_top);
 }

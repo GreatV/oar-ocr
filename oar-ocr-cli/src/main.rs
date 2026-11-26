@@ -41,6 +41,7 @@ const PARSERS: &[AnyPageParserModel] = &[
     AnyPageParserModel::MonkeyOcrV2B,
     AnyPageParserModel::Nemotron35Parse,
     AnyPageParserModel::OpenThaiMarkdown,
+    AnyPageParserModel::Ocria,
     AnyPageParserModel::OvisOcr2,
     AnyPageParserModel::OvisOcr3,
     AnyPageParserModel::Oxr,
@@ -589,6 +590,11 @@ fn load_parser(args: &args::Parse, device: &str) -> Result<AnyPageParser> {
         }
         let device = oar_ocr_vl::utils::parse_device(device)
             .context("could not create the requested device; try --device cpu")?;
+        if model == AnyPageParserModel::Ocria {
+            tracing::warn!(
+                "OCRia-1 is downloaded from llamaindex/OCRia-1 under the OCRia-1 Model and Code License, which restricts commercial use: https://huggingface.co/llamaindex/OCRia-1/blob/main/LICENSE"
+            );
+        }
         AnyPageParser::from_pretrained(model, device, &options)
             .context("could not download or load the parser; check connectivity, try --source huggingface, or provide --model-dir and --layout-dir for offline loading")
     }
